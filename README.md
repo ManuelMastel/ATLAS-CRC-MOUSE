@@ -1,6 +1,6 @@
-# Mouse Colorectal Cancer Atlas – Figures 1–7 Reproducibility Package
+# Mouse Colorectal Cancer Atlas
 
-This repository contains the complete R code and analysis notebooks required to reproduce **Figures 1–7** of the manuscript:
+This repository contains the complete R code and analysis notebooks required to reproduce **Figures** of the manuscript:
 
 **“Genotype-phenotype mapping identifies fetal-like CD55+ immunoregulatory cancer cells as mediators of immune escape in colorectal cancer”**  
 Mastel et al., *Bioarxiv* (in preparation / in press)
