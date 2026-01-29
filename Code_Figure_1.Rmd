@@ -1,0 +1,467 @@
+---
+title: "Mouse Colorectal Cancer Atlas Overview"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  results = "hide",   # hide printed text, keep plots
+  fig.align = "center",
+  fig.width = 12,
+  fig.height = 7
+)
+
+```
+
+## Introduction
+
+This notebook reproduces the key overview panels of Figure 1, which define the scope and structure of the mouse colorectal cancer atlas used throughout the study. We integrate cohort-level metadata with engineered driver genotypes to provide a compact reference for how each model was generated, where tumors arise, and how aggressively they progress in vivo. Together, these panels establish the experimental design space—genetic background, induction strategy, and phenotypic output—that underpins all downstream single-cell and microenvironment analyses.
+
+
+## Figure 1b – Atlas overview of CRC mouse models
+
+This panel summarizes the full ATLAS cohort in a single integrated heatmap. Columns correspond to individual tumor cohorts/models (as defined in ATLAS_OVERVIEW.xlsx), while rows capture (i) engineered driver alterations (Apc, Kras, Trp53, Braf, N1icd, Ctnnb1, Arid1a, Atm, Atrx, Fbxw7, Smad4, Pten, Ptprt; encoded as WT/HET/HOM/KO/OE) and (ii) core experimental and phenotypic characteristics of each model, including model system (GEMM vs CRISPR-GEMM), injection route, tumor location, and route (classical vs serrated). Quantitative tracks report animals injected, sex ratio (male fraction), tumor penetrance, median survival, tumors per mouse, and cells sequenced. Together, this overview provides a compact reference linking genotype, experimental design, and in vivo aggressiveness/throughput across all models used in the study.
+
+```{r}
+
+# ---- Packages ----
+library(readxl)
+library(dplyr)
+library(stringr)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+
+# ---- 1) Load Excel ----
+xlsx <- "ATLAS_OVERVIEW.xlsx"
+raw <- read_xlsx(xlsx, sheet = "Sheet1")
+
+stopifnot("Model" %in% names(raw))
+cohort_cols <- setdiff(names(raw), c("Model", "Unnamed: 1"))
+cohort_cols <- cohort_cols[!is.na(cohort_cols) & cohort_cols != ""]
+
+# ---- 2) Helpers ----
+to_num <- function(x) {
+  y <- as.character(x)
+  y[y %in% c("", "NA", "N/A", "n/a", "X", "x", "–", "-")] <- NA
+  y <- gsub("%", "", y)
+  y <- gsub(",", "", y)
+  suppressWarnings(as.numeric(y))
+}
+
+# Standardize categorical strings: trim spaces, unify separators, fix variants
+clean_cat_vals <- function(v) {
+  v <- as.character(v)
+  v <- stringr::str_trim(v)
+  v <- gsub("\u2013|\u2212", "-", v)     # replace en-dash/minus with hyphen
+  v <- gsub("\\s*/\\s*", "/", v)         # collapse " / " -> "/"
+  v[v %in% c("", "NA", "N/A", "n/a", "–", "-")] <- NA
+  v
+}
+
+# ---- 3) Row labels present in your sheet ----
+rows_info <- c("Model system", "Injection route", "Tumor location", "Route")
+row_label_animals <- "Number of animals injected"
+row_label_sex     <- "Male / Female"
+row_label_pen     <- "Penetrance"
+row_label_surv    <- "Median survival"
+row_label_tpmouse <- "Tumors per mouse"
+row_label_cells   <- "cells sequenced"
+
+gene_rows <- c("Apc","Kras","Trp53","Braf","N1icd","Ctnnb1",
+               "Arid1a","Atm","Atrx","Fbxw7","Smad4","Pten","Ptprt")
+
+# ---- 4) Extract & CLEAN the categorical info rows (exact categories) ----
+get_cat_row <- function(label) {
+  if (!(label %in% raw$Model)) return(NULL)
+  v <- raw %>% filter(Model == label) %>% select(all_of(cohort_cols)) %>% unlist(use.names = FALSE)
+  clean_cat_vals(v)
+}
+
+info_rows <- lapply(rows_info, get_cat_row)
+names(info_rows) <- rows_info
+info_rows <- info_rows[!sapply(info_rows, is.null)]
+
+# Make factors with EXACT allowed levels per row (prevents accidental NA)
+levels_modelsystem <- c("GEMM", "CRISPR-GEMM")
+levels_injection   <- c("IC", "Systemic", "Systemic/IC")
+levels_tumorloc    <- c("Distal colon", "SI")
+levels_route       <- c("Classical", "Serrated")
+
+if ("Model system" %in% names(info_rows))
+  info_rows[["Model system"]] <- factor(info_rows[["Model system"]], levels = levels_modelsystem)
+if ("Injection route" %in% names(info_rows))
+  info_rows[["Injection route"]] <- factor(info_rows[["Injection route"]], levels = levels_injection)
+if ("Tumor location" %in% names(info_rows))
+  info_rows[["Tumor location"]] <- factor(info_rows[["Tumor location"]], levels = levels_tumorloc)
+if ("Route" %in% names(info_rows))
+  info_rows[["Route"]] <- factor(info_rows[["Route"]], levels = levels_route)
+
+# ---- 5) Quantitative & biological rows ----
+animals_vec <- raw %>% filter(Model == row_label_animals) %>%
+  select(all_of(cohort_cols)) %>% unlist(use.names = FALSE) %>% to_num()
+
+sex_vec_raw <- raw %>% filter(Model == row_label_sex) %>%
+  select(all_of(cohort_cols)) %>% unlist(use.names = FALSE) %>% as.character()
+
+parse_sex_ratio <- function(x) {
+  sapply(x, function(v) {
+    v <- str_trim(v)
+    if (is.na(v) || v == "") return(NA_real_)
+    parts <- unlist(strsplit(v, "\\|"))
+    if (length(parts) != 2) return(NA_real_)
+    m <- suppressWarnings(as.numeric(str_trim(parts[1])))
+    f <- suppressWarnings(as.numeric(str_trim(parts[2])))
+    if (is.na(m) || is.na(f) || (m + f) == 0) return(NA_real_)
+    m / (m + f)  # male fraction 0..1
+  })
+}
+sex_male_frac <- parse_sex_ratio(sex_vec_raw)
+
+pen_vec   <- raw %>% filter(Model == row_label_pen) %>% select(all_of(cohort_cols)) %>% unlist(use.names = FALSE) %>% to_num()
+surv_vec  <- raw %>% filter(Model == row_label_surv) %>% select(all_of(cohort_cols)) %>% unlist(use.names = FALSE) %>% to_num()
+tpmouse_vec <- raw %>% filter(Model == row_label_tpmouse) %>% select(all_of(cohort_cols)) %>% unlist(use.names = FALSE) %>% to_num()
+cells_vec <- raw %>% filter(Model == row_label_cells) %>% select(all_of(cohort_cols)) %>% unlist(use.names = FALSE) %>% to_num()
+
+# ---- 6) Mutation matrix ----
+mut_df <- raw %>%
+  filter(Model %in% gene_rows) %>%
+  mutate(Model = factor(Model, levels = gene_rows)) %>%
+  arrange(Model)
+
+mut_mat <- mut_df %>% select(all_of(cohort_cols)) %>% as.matrix()
+rownames(mut_mat) <- mut_df$Model
+
+map_mut <- function(x) {
+  x <- tolower(as.character(x))
+  x[x %in% c("", "na", "n/a", "–", "-")] <- NA
+  dplyr::recode(x,
+    "wt"="WT","het"="HET","hom"="HOM","ko"="KO","oe"="OE",
+    .default=toupper(x)
+  )
+}
+mut_mat[] <- map_mut(mut_mat[])
+
+# ---- 7) Color palettes (distinct per info row) ----
+cols_modelsystem <- c("GEMM"="#1F78B4", "CRISPR-GEMM"="#A6CEE3")
+cols_injection   <- c("IC"="#8856A7", "Systemic"="#9EBCDA", "Systemic/IC"="#B3DE69")
+cols_tumorloc    <- c("Distal colon"="#31A354", "SI"="#74C476")
+cols_route       <- c("Classical"="#F4A582", "Serrated"="#B2182B")
+
+sex_grad      <- colorRamp2(c(0,1), c("#B3002D","#0B3C8C"))  # 0=female → 1=male
+col_animals   <- colorRamp2(c(0, max(animals_vec, na.rm=TRUE)), c("#FFF5EB","#7F2704"))
+col_penetrance<- colorRamp2(c(0,50,100), c("#F8EAEA","#8B0000","#4E0000"))
+col_survival <- circlize::colorRamp2(
+  c(0, 50, 100, 150, 200, 250, 300, 350),
+  c("#7F0000", "#B2182B", "#D73027", "#F46D43", "#FDAE61", "#A6D96A", "#66BD63", "#1A9850")
+)
+
+col_tpmouse   <- colorRamp2(range(tpmouse_vec, na.rm=TRUE), c("grey85","grey20"))
+col_cells     <- colorRamp2(c(0, max(cells_vec, na.rm=TRUE)), c("#E8F6F3","#117A65"))
+
+mut_cols <- c(WT="#BFBFBF", HET="#F39C12", HOM="#F1C40F", KO="#C0392B", OE="#2980B9")
+na_col   <- "grey85"
+
+
+
+# ---- 8) Heatmap helpers ----
+mk_cat_row <- function(values, row_name, cols, legend_title=row_name) {
+  m <- matrix(values, nrow=1, dimnames=list(row_name, NULL))
+  Heatmap(m, name=row_name, col=cols, cluster_rows=FALSE, cluster_columns=FALSE,
+          rect_gp=gpar(col="white"), show_row_names=TRUE, show_column_names=FALSE,
+          na_col=na_col, heatmap_legend_param=list(title=legend_title))
+}
+mk_num_row <- function(values, row_name, col_fun, legend_title=row_name) {
+  m <- matrix(values, nrow=1, dimnames=list(row_name, NULL))
+  Heatmap(m, name=row_name, col=col_fun, cluster_rows=FALSE, cluster_columns=FALSE,
+          rect_gp=gpar(col="white"), show_row_names=TRUE, show_column_names=FALSE,
+          na_col=na_col, heatmap_legend_param=list(title=legend_title))
+}
+
+
+
+# ---- 9) Build the plot (mutations first so column names are on TOP) ----
+
+# Mutations block FIRST + show column names at the top
+ht_list <- Heatmap(
+  mut_mat, name = "Mutations", col = mut_cols,
+  cluster_rows = FALSE, cluster_columns = FALSE,
+  rect_gp = gpar(col = "white"), na_col = na_col,
+  row_names_side = "left",
+  column_labels = cohort_cols,
+  show_column_names = TRUE,
+  column_names_side = "top",              # put cohort names at the very top
+  column_names_gp = gpar(fontsize = 9, fontface = "bold"),
+  column_names_rot = 45,
+  heatmap_legend_param = list(title = "Mutations")
+)
+
+# Then append the characteristics (info rows + numeric tracks)
+if ("Model system" %in% names(info_rows))
+  ht_list <- ht_list %v% mk_cat_row(info_rows[["Model system"]], "Model system", cols_modelsystem)
+if ("Injection route" %in% names(info_rows))
+  ht_list <- ht_list %v% mk_cat_row(info_rows[["Injection route"]], "Injection route", cols_injection)
+if ("Tumor location" %in% names(info_rows))
+  ht_list <- ht_list %v% mk_cat_row(info_rows[["Tumor location"]], "Tumor location", cols_tumorloc)
+if ("Route" %in% names(info_rows))
+  ht_list <- ht_list %v% mk_cat_row(info_rows[["Route"]], "Route", cols_route)
+
+ht_list <- ht_list %v% mk_num_row(animals_vec, "Animals injected", col_animals, "Animals injected")
+ht_list <- ht_list %v% mk_num_row(sex_male_frac, "Sex ratio", sex_grad, "Male proportion (0–1)")
+ht_list <- ht_list %v% mk_num_row(pen_vec, "Penetrance", col_penetrance, "Tumour penetrance (%)")
+ht_list <- ht_list %v% mk_num_row(surv_vec, "Survival", col_survival, "Median survival (t.a.i.)")
+ht_list <- ht_list %v% mk_num_row(tpmouse_vec, "Tumors/mouse", col_tpmouse, "Tumors per mouse")
+# (add scRNA-seq and cells if you had them)
+# ht_list <- ht_list %v% mk_num_row(scrna_vec, "scRNA-seq", col_scrna, "scRNA-seq yield")
+ht_list <- ht_list %v% mk_num_row(cells_vec, "Cells sequenced", col_cells, "Cells sequenced")
+
+# ---- 10) Draw ----
+draw(
+  ht_list,
+  heatmap_legend_side = "right",
+  annotation_legend_side = "right",
+  column_title = "ATLAS overview",
+  column_title_gp = gpar(fontsize = 12, fontface = "bold")
+)
+
+
+
+```
+
+
+## Figure 1e - Pathology grid by genotype
+
+This panel presents a genotype-resolved histopathological overview of colorectal tumors across the full mouse atlas. For each genotype (columns), individual mice (rows, up to six per model) are annotated for key pathological features, including lesion type, tumor grade, dysplasia grade, pT stage, growth pattern, glandular differentiation, necrosis, and desmoplasia. Quantitative measures of gland formation and necrosis are discretized into percentage bins and displayed as color-coded tiles. This representation captures both intra-model heterogeneity and genotype-specific pathological programs, enabling direct comparison of tumor differentiation state, invasive behavior, and stromal reaction across genetic backgrounds.
+
+
+```{r}
+
+## ============================================================
+## Figure 1b – Pathology grid by genotype
+##
+## Description:
+## Creates the FINAL stacked pathology tile grid from histo_mouse_atlas_EN.xlsx.
+## X-axis: genotype blocks
+## Y-axis: mouse_id (1..6 per genotype; completed if missing)
+## Rows: lesion type, tumor grade, dysplasia, pT, growth pattern,
+##       gland formation (% binned), necrosis (% binned), desmoplasia
+## Legends: kept per row (no collection), NA shown as grey55.
+##
+## Output:
+## p_grid (ggplot object) + optional PNG/PDF export
+## ============================================================
+
+suppressPackageStartupMessages({
+  library(readxl)
+  library(janitor)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(ggplot2)
+  library(patchwork)
+  library(grid)   # unit()
+  library(readr)  # parse_number()
+})
+
+## ============================================================
+## 0) Helpers
+## ============================================================
+
+normalize_dash <- function(x) {
+  x <- as.character(x)
+  x <- str_replace_all(x, "[\u2010\u2011\u2012\u2013\u2014\u2212]", "-")
+  x <- str_squish(x)
+  dplyr::na_if(x, "")
+}
+
+parse_num_safe <- function(x) {
+  x <- normalize_dash(x)
+  readr::parse_number(x, locale = readr::locale(decimal_mark = ".", grouping_mark = ","))
+}
+
+bin_percent <- function(x) {
+  dplyr::case_when(
+    is.na(x)          ~ NA_character_,
+    x == 0            ~ "0",
+    x > 0  & x <= 10  ~ "1-10",
+    x > 10 & x <= 20  ~ "11-20",
+    x > 20 & x <= 50  ~ "21-50",
+    x > 50            ~ ">50"
+  )
+}
+
+## ============================================================
+## 1) Read + clean
+## ============================================================
+path_xlsx <- "histo_mouse_atlas.xlsx"   # <-- adjust if needed
+
+df <- readxl::read_xlsx(path_xlsx) %>%
+  janitor::clean_names() %>%
+  mutate(across(where(is.character), normalize_dash)) %>%
+  mutate(
+    genotype = as.character(genotype),
+    mouse_id = suppressWarnings(as.integer(mouse_id)),
+
+    lesion_type     = normalize_dash(lesion_type),
+    tumor_grade     = normalize_dash(tumor_grade),
+    dysplasia_grade = normalize_dash(dysplasia_grade),
+    p_t             = normalize_dash(p_t),
+    growth_pattern  = normalize_dash(growth_pattern),
+    desmoplasia     = normalize_dash(desmoplasia),
+
+    gland_formation_percent = parse_num_safe(gland_formation_percent),
+    necrosis_percent        = parse_num_safe(necrosis_percent)
+  )
+
+## order genotypes as they appear
+geno_order <- unique(df$genotype)
+df$genotype <- factor(df$genotype, levels = geno_order)
+
+## ensure each genotype shows 6 mouse rows
+df <- df %>%
+  complete(genotype, mouse_id = 1:6) %>%
+  arrange(genotype, mouse_id) %>%
+  mutate(
+    gland_bin   = normalize_dash(bin_percent(gland_formation_percent)),
+    necrosis_bin = normalize_dash(bin_percent(necrosis_percent))
+  )
+
+## ============================================================
+## 2) Palettes (dark-ish pastel); NA shown separately in scale
+## ============================================================
+pal_lesion <- c(
+  "Adenoma ± transition" = "#5DA5DA",
+  "Adenocarcinoma"       = "#59A14F",
+  "Carcinoma"            = "#E15759"
+)
+
+pal_grade <- c(
+  "low-grade"  = "#59A14F",
+  "mixed"      = "#F28E2B",
+  "high-grade" = "#E15759"
+)
+
+pal_dys <- c(
+  "Low-grade dysplasia"  = "#59A14F",
+  "High-grade dysplasia" = "#E15759",
+  "mixed (low+high)"     = "#F28E2B"
+)
+
+pal_pT <- c(
+  "T1"  = "#4E79A7",
+  "T2"  = "#59A14F",
+  "T3"  = "#F28E2B",
+  "T4b" = "#E15759"
+)
+
+pal_growth <- c(
+  "Pushing"      = "#4E79A7",
+  "Infiltrative" = "#E15759"
+)
+
+pal_desmo <- c(
+  "None"     = "#BDBDBD",
+  "Mild"     = "#59A14F",
+  "Moderate" = "#F28E2B",
+  "Severe"   = "#E15759"
+)
+
+pal_bin <- c(
+  "0"     = "#BDBDBD",
+  "1-10"  = "#59A14F",
+  "11-20" = "#4E79A7",
+  "21-50" = "#F28E2B",
+  ">50"   = "#E15759"
+)
+
+## ============================================================
+## 3) Row plot function (LEFT label, per-row legend on RIGHT)
+## ============================================================
+make_row_plot <- function(data, var, row_label, pal, show_x = FALSE) {
+
+  levs <- names(pal)
+
+  pdat <- data %>%
+    transmute(
+      genotype  = genotype,
+      mouse_id  = factor(mouse_id, levels = rev(1:6)),
+      value_raw = normalize_dash(.data[[var]])
+    ) %>%
+    mutate(value = factor(value_raw, levels = levs))
+
+  ggplot(pdat, aes(x = genotype, y = mouse_id, fill = value)) +
+    geom_tile(color = "grey80", linewidth = 0.25, width = 0.98, height = 0.95) +
+    annotate(
+      "text",
+      x = 0.45, y = 3.5, label = row_label,
+      hjust = 1, vjust = 0.5, size = 3.1
+    ) +
+    scale_fill_manual(
+      values   = pal,
+      limits   = levs,
+      breaks   = levs,
+      drop     = FALSE,
+      na.value = "grey55"
+    ) +
+    labs(x = NULL, y = NULL, fill = NULL) +
+    coord_cartesian(clip = "off") +
+    theme_minimal(base_size = 12) +
+    theme(
+      panel.grid = element_blank(),
+      axis.text.y  = element_blank(),
+      axis.ticks.y = element_blank(),
+      axis.text.x  = if (show_x) element_text(angle = 45, hjust = 1, size = 8) else element_blank(),
+      axis.ticks.x = element_blank(),
+      plot.margin  = margin(1.5, 18, 1.5, 70),
+      legend.position      = "right",
+      legend.justification = "left",
+      legend.box.just      = "left",
+      legend.key.height    = unit(0.25, "cm"),
+      legend.key.width     = unit(0.25, "cm"),
+      legend.text          = element_text(size = 7),
+      legend.title         = element_text(size = 7)
+    )
+}
+
+## ============================================================
+## 4) Build rows + stack (FINAL plot)
+## ============================================================
+p_grid <- (
+  make_row_plot(df, "lesion_type",     "Lesion type",          pal_lesion) /
+  make_row_plot(df, "tumor_grade",     "Tumor grade",          pal_grade) /
+  make_row_plot(df, "dysplasia_grade", "Dysplasia",            pal_dys) /
+  make_row_plot(df, "p_t",             "pT",                   pal_pT) /
+  make_row_plot(df, "growth_pattern",  "Growth pattern",       pal_growth) /
+  make_row_plot(df, "gland_bin",       "Gland formation (%)",  pal_bin) /
+  make_row_plot(df, "necrosis_bin",    "Necrosis (%)",         pal_bin) /
+  make_row_plot(df, "desmoplasia",     "Desmoplasia",          pal_desmo, show_x = TRUE)
+) +
+  plot_layout(heights = rep(1, 8), guides = "keep")
+
+p_grid
+
+## ============================================================
+## 5) Save (optional)
+## ============================================================
+#ggsave("histology_grid_by_genotype.png", p_grid, width = 14, height = 10, dpi = 300)
+#ggsave("histology_grid_by_genotype.pdf", p_grid, width = 14, height = 10, useDingbats = FALSE)
+
+
+```
+## Final note
+
+All visualizations are generated directly from the curated Excel source files to ensure transparency and straightforward updates when new cohorts are added. The scripts explicitly standardize categorical labels and numeric fields to guarantee stable legend mapping and consistent ordering across models. The resulting plots serve as a single “lookup table” linking genotype → model setup → pathology/fitness, enabling interpretable comparisons across the atlas and reproducible figure regeneration.
+
