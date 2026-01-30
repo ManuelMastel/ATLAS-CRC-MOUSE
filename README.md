@@ -3,9 +3,9 @@
 This repository contains the complete R code and analysis notebooks required to reproduce **Figures** of the manuscript:
 
 **“Genotype-phenotype mapping identifies fetal-like CD55+ immunoregulatory cancer cells as mediators of immune escape in colorectal cancer”**  
-Mastel et al., *Bioarxiv* (in preparation / in press)
+Mastel et al., *Biorxiv* (in preparation / in press)
 
-The code covers all atlas-level visualizations, single-cell analyses, pathology annotations, trajectory inference, immune–tumor interaction analyses, and cross-species comparisons presented in the text.
+The code covers all atlas-level visualizations, single-cell analyses, pathology annotations, trajectory inference, immune-tumor interaction analyses and cross-species comparisons presented in the text.
 
 ## Overview
 
@@ -13,7 +13,7 @@ We constructed a comprehensive mouse colorectal cancer (CRC) atlas spanning:
 
 - Classical and serrated tumorigenesis routes  
 - GEMM and multiplex CRISPR-GEMM models  
-- Primary tumors and metastases  
+- Wild-type colon tissue, adenomas and carcinomas from different mouse models  
 - Epithelial plasticity, immune evasion, and microenvironmental remodeling  
 - Cross-species integration with human CRC (TCGA, scRNA-seq)
 
@@ -31,16 +31,16 @@ All panels are generated from the same processed objects used for the manuscript
 
 The goal of this repository is to provide a fully transparent and executable reference for:
 
-- Reproducing every main-text figure (Fig. 1–7)
+- Reproducing every figure
 - Linking genotype, pathology, and single-cell states
 - Enabling reviewers and readers to regenerate all plots directly from source data
 - Facilitating reuse of the atlas framework for comparative and translational studies
 
-If the notebooks for all figures execute successfully and regenerate the published panels, this repository has achieved its goal.
+If the notebooks for the figures execute successfully and regenerate the published panels, this repository has achieved its goal.
 
 ## Figure–code mapping
 
-| Figure | Notebook | Description |
+| Figure | Notebook | Description | 
 |--------|----------|-------------|
 | Fig. 1b | `Code_Figure_1.Rmd` | Atlas genotype & cohort overview |
 | Fig. 1e | `Code_Figure_1.Rmd` | Histopathology grid by genotype |
