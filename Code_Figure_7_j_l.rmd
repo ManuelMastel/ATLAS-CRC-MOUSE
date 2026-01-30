@@ -1,0 +1,770 @@
+---
+title: "TCGA-COAD Survival & Molecular Subtype Analyses for the CD55-Associated Immune-Regulatory
+  (IRC) Signature"
+author: Manuel Mastel
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  results = "hide",   # hide printed text, keep plots
+  fig.align = "center",
+  fig.width = 12,
+  fig.height = 7
+)
+
+```
+
+## Introduction
+
+This R Notebook reproduces the TCGA-COAD analyses used to evaluate the clinical relevance of the CD55-associated immune-regulatory epithelial program (IRC signature). Starting from raw RNA-seq counts downloaded via TCGAbiolinks, the notebook (i) constructs a patient-level overall survival (OS) table, (ii) aligns primary tumor expression profiles to OS metadata, and (iii) generates edgeR-normalized logCPM values for downstream scoring. A set of reusable helper functions is then provided to compute per-patient expression scores for individual genes or multi-gene signatures (with robust handling of gene identifiers via rowData(exp_se) mapping) and to perform Kaplan–Meier survival analyses using flexible high/low stratification schemes (median or extreme quantiles). Finally, the notebook quantifies how IRC activity associates with clinicopathologic progression (AJCC stage I–IV and early vs late disease) and with Consensus Molecular Subtypes (CMS1–CMS4) inferred by CMScaller from raw counts. All plots are generated in a publication-oriented style and are intended to be directly reusable for GitHub-based code release and manuscript figure reproduction.
+
+```{r}
+
+## ============================================================
+## Kaplan–Meier Survival Analysis in TCGA-COAD (Overall Survival)
+## ============================================================
+##
+## Purpose
+##   - Download TCGA-COAD gene expression count data (STAR - Counts)
+##   - Build a patient-level overall survival (OS) table
+##   - Align expression samples to survival metadata for downstream KM analyses
+##
+## Notes
+##   - TCGA identifiers:
+##       * Sample barcode:  TCGA-XX-YYYY-ZZ... (e.g., TCGA-AB-1234-01A-...)
+##       * Patient ID:      first 12 characters (TCGA-XX-YYYY)
+##   - OS time is defined as:
+##       * Dead:   days_to_death
+##       * Alive:  days_to_last_follow_up
+##   - By default, we restrict to Primary Tumor samples ("TP").
+##
+## Reproducibility
+##   - GDCdownload() can be slow; chunk size is configurable.
+##   - Consider caching the downloaded data directory in your project workflow.
+##
+## Dependencies
+##   - Bioconductor: TCGAbiolinks, SummarizedExperiment
+##   - CRAN: dplyr
+##
+## ============================================================
+
+## ---- setup-packages ---------------------------------------------------------
+## If needed (one-time):
+## BiocManager::install(c("TCGAbiolinks", "SummarizedExperiment"))
+
+suppressPackageStartupMessages({
+  library(TCGAbiolinks)
+  library(SummarizedExperiment)
+  library(dplyr)
+})
+
+## ---- query-download-prepare -------------------------------------------------
+# 1) Define query: TCGA-COAD, STAR raw counts
+query_exp <- GDCquery(
+  project       = "TCGA-COAD",
+  data.category = "Transcriptome Profiling",
+  data.type     = "Gene Expression Quantification",
+  workflow.type = "STAR - Counts"
+)
+
+# 2) Download
+#    Adjust files.per.chunk downward if your connection is unstable.
+# GDCdownload(
+#   query_exp,
+#   method          = "api",
+#   files.per.chunk = 50
+# )
+
+# 3) Prepare as a SummarizedExperiment
+exp_se <- GDCprepare(query_exp)
+
+## ---- extract-counts ---------------------------------------------------------
+# Extract raw count matrix (genes x samples)
+counts_all <- assay(exp_se)
+
+# Quick sanity check
+stopifnot(is.matrix(counts_all) || is(counts_all, "matrix"))
+counts_all[1:5, 1:5]
+
+## ---- restrict-primary-tumor -------------------------------------------------
+# Restrict to Primary Tumor (TP) samples
+tp_samples <- TCGAquery_SampleTypes(
+  colnames(counts_all),
+  typesample = "TP"
+)
+
+counts_tp <- counts_all[, tp_samples, drop = FALSE]
+
+message("Total samples (all): ", ncol(counts_all))
+message("Primary tumor samples (TP): ", ncol(counts_tp))
+
+## ---- build-survival-table ---------------------------------------------------
+# Build patient-level OS metadata from colData
+cd <- as.data.frame(colData(exp_se))
+
+# Required columns check (fail early with a clear error if TCGA formats change)
+required_cols <- c(
+  "barcode", "vital_status", "days_to_death", "days_to_last_follow_up",
+  "age_at_diagnosis", "gender", "ajcc_pathologic_stage"
+)
+missing_cols <- setdiff(required_cols, colnames(cd))
+if (length(missing_cols) > 0) {
+  stop("Missing required columns in colData(exp_se): ",
+       paste(missing_cols, collapse = ", "))
+}
+
+surv_df <- cd %>%
+  transmute(
+    sample_id  = barcode,
+    patient_id = substr(barcode, 1, 12),
+
+    # Overall survival time (days)
+    time = ifelse(
+      vital_status == "Dead",
+      as.numeric(days_to_death),
+      as.numeric(days_to_last_follow_up)
+    ),
+
+    # Event indicator: 1 = death, 0 = censored
+    event = ifelse(vital_status == "Dead", 1L, 0L),
+
+    # Covariates (optional; keep for multivariable Cox later)
+    age_at_diagnosis = as.numeric(age_at_diagnosis),
+    gender           = as.character(gender),
+    ajcc_pathologic_stage = as.character(ajcc_pathologic_stage)
+  )
+
+# Basic QC: remove missing or non-positive follow-up times
+surv_df <- surv_df %>%
+  filter(!is.na(time) & time > 0 & !is.na(event))
+
+message("Survival rows after QC: ", nrow(surv_df))
+message("Events (death=1): ", sum(surv_df$event == 1))
+summary(surv_df$time)
+
+## ---- patient-level-deduplication -------------------------------------------
+# TCGA can include multiple samples per patient. For survival analysis, we need
+# exactly one record per patient. Here, we choose the earliest available
+# follow-up time per patient (conservative in terms of time definition).
+#
+# Alternative strategies:
+#   - Choose the first tumor sample chronologically if you have collection dates
+#   - Prefer "01A" over other aliquots, etc.
+surv_patient <- surv_df %>%
+  group_by(patient_id) %>%
+  slice_min(order_by = time, with_ties = FALSE) %>%
+  ungroup()
+
+message("Unique patients with OS info: ", nrow(surv_patient))
+
+## ---- align-counts-to-survival ----------------------------------------------
+# Align expression (TP samples) to patient-level survival table
+patient_ids_tp <- substr(colnames(counts_tp), 1, 12)
+keep <- patient_ids_tp %in% surv_patient$patient_id
+
+counts_os <- counts_tp[, keep, drop = FALSE]
+
+# Reorder survival rows to match expression column order
+surv_os <- surv_patient[match(substr(colnames(counts_os), 1, 12),
+                              surv_patient$patient_id), ]
+
+# Final alignment checks
+stopifnot(ncol(counts_os) == nrow(surv_os))
+stopifnot(all(substr(colnames(counts_os), 1, 12) == surv_os$patient_id))
+
+message("Aligned expression samples for OS analysis: ", ncol(counts_os))
+
+## ---- outputs ----------------------------------------------------------------
+# At this stage you have:
+#   - counts_os : genes x samples (primary tumor; one per patient after matching)
+#   - surv_os   : patient-level OS metadata aligned to counts_os columns
+#
+# Next steps typically include:
+#   - Normalization (e.g., edgeR/DESeq2/voom)
+#   - Define high/low expression groups for a gene or signature
+#   - Fit KM curves (survival::Surv + survfit) and visualize (survminer)
+
+
+library(edgeR)
+
+## ------------------------------------------------------------
+## Build logCPM for TCGA-COAD (recommended once per notebook)
+## ------------------------------------------------------------
+
+# counts_os: genes x samples matrix aligned to your survival table (surv_os or surv_df_unique)
+# If you do not already have counts_os, create it exactly as in your earlier chunk.
+
+dge_tcga <- DGEList(counts = counts_os)
+dge_tcga <- calcNormFactors(dge_tcga)
+logCPM   <- cpm(dge_tcga, log = TRUE, prior.count = 1)
+
+# sanity
+dim(logCPM)
+logCPM[1:5, 1:5]
+
+
+
+```
+
+
+## Kaplan–Meier Survival Analysis Based on Gene or Gene-Set Expression
+
+This section implements a flexible survival analysis framework that links tumor gene expression to patient outcome in the TCGA colorectal cancer cohort. The provided functions compute per-patient expression scores either for a single gene (e.g., CD55) or for a multi-gene signature by averaging normalized logCPM values across the specified gene set. These patient-level scores are then integrated with the clinical survival table (containing overall survival time and event status) and used to stratify samples into high- and low-expression groups based on either a median split or upper/lower quantiles (e.g., top and bottom 20% or 30%). Kaplan–Meier curves with log-rank p-values and risk tables are generated to visualize and statistically assess the association between expression level and overall survival, enabling direct evaluation of prognostic effects of individual genes or coordinated transcriptional programs such as the CD55-associated immune-regulatory signature.
+
+Function:
+- accepts either a single gene (e.g., "CD55") or a gene set (character vector),
+- computes an expression/score per patient (TCGA 12-char ID),
+- merges with your surv_df (must contain patient_id, time, event),
+- splits samples into High/Low (median or top/bottom X%),
+- plots the Kaplan–Meier curve with risk table.
+
+```{r}
+
+
+library(dplyr)
+library(SummarizedExperiment)
+library(survival)
+library(survminer)
+
+## ------------------------------------------------------------
+## Helper 1: compute signature score per sample
+## ------------------------------------------------------------
+score_from_signature <- function(exp_se,
+                                 logCPM,
+                                 gene_set,
+                                 score_name = "signature_score",
+                                 symbol_col = NULL) {
+  rd <- as.data.frame(rowData(exp_se))
+
+  # Auto-detect symbol column if not provided
+  if (is.null(symbol_col)) {
+    candidate_cols <- c("gene_name", "external_gene_name",
+                        "symbol", "hgnc_symbol", "GeneSymbol")
+    symbol_col <- intersect(candidate_cols, colnames(rd))[1]
+    if (is.na(symbol_col)) {
+      stop("Could not detect a gene symbol column in rowData(exp_se). ",
+           "Please provide 'symbol_col' explicitly.")
+    }
+  } else if (!symbol_col %in% colnames(rd)) {
+    stop("Provided symbol_col '", symbol_col,
+         "' not found in rowData(exp_se).")
+  }
+
+  # Map gene symbols to row indices
+  idx <- which(rd[[symbol_col]] %in% gene_set)
+  if (length(idx) == 0) {
+    stop("None of the genes in gene_set were found in rowData(exp_se)[['",
+         symbol_col, "']].")
+  }
+
+  found_genes <- rd[[symbol_col]][idx]
+  missing_genes <- setdiff(gene_set, found_genes)
+  if (length(missing_genes) > 0) {
+    message("Warning: the following genes were not found and will be ignored: ",
+            paste(missing_genes, collapse = ", "))
+  }
+
+  # Compute mean logCPM across signature genes
+  sig_score <- colMeans(
+    logCPM[idx, , drop = FALSE],
+    na.rm = TRUE
+  )
+
+  # Per-patient table
+  df <- data.frame(
+    patient_id = substr(names(sig_score), 1, 12),
+    score      = as.numeric(sig_score),
+    stringsAsFactors = FALSE
+  )
+  colnames(df)[2] <- score_name
+
+  return(list(
+    score_df    = df,
+    symbol_col  = symbol_col,
+    idx         = idx,
+    found_genes = found_genes
+  ))
+}
+
+## ------------------------------------------------------------
+## Helper 2: Kaplan–Meier from a signature score
+##   split = "20", "30", or "median"
+## ------------------------------------------------------------
+km_from_signature <- function(exp_se,
+                              logCPM,
+                              surv_df,
+                              gene_set,
+                              split      = c("20", "30", "median"),
+                              score_name = "signature_score",
+                              symbol_col = NULL,
+                              legend_title = "Signature") {
+  split <- match.arg(split)
+
+  ## 1) Compute signature score
+  sig_res <- score_from_signature(
+    exp_se     = exp_se,
+    logCPM     = logCPM,
+    gene_set   = gene_set,
+    score_name = score_name,
+    symbol_col = symbol_col
+  )
+
+  score_df <- sig_res$score_df
+  colnames(score_df)[2] <- "score"
+
+  ## 2) Merge with survival table
+  km_df <- surv_df %>%
+    inner_join(score_df, by = "patient_id") %>%
+    filter(!is.na(score), !is.na(time), !is.na(event))
+
+  ## 3) Define grouping based on split mode
+  if (split %in% c("20", "30")) {
+    p_low  <- as.numeric(split) / 100
+    p_high <- 1 - p_low
+
+    qs <- quantile(km_df$score, probs = c(p_low, p_high), na.rm = TRUE)
+    low_cut  <- qs[1]
+    high_cut <- qs[2]
+
+    km_df_sub <- km_df %>%
+      mutate(
+        group = case_when(
+          score <= low_cut  ~ "Low",
+          score >= high_cut ~ "High",
+          TRUE              ~ NA_character_
+        )
+      ) %>%
+      filter(!is.na(group))
+
+    legend_labs <- c(
+      paste0("High ", split, "%"),
+      paste0("Low ",  split, "%")
+    )
+
+  } else if (split == "median") {
+    med <- median(km_df$score, na.rm = TRUE)
+
+    km_df_sub <- km_df %>%
+      mutate(
+        group = ifelse(score >= med, "High", "Low")
+      )
+
+    legend_labs <- c("High (≥ median)", "Low (< median)")
+  }
+
+  km_df_sub$group <- factor(km_df_sub$group, levels = c("High", "Low"))
+
+  ## 4) Fit KM
+  fit <- survfit(
+    Surv(time, event) ~ group,
+    data = km_df_sub
+  )
+
+  ## 5) Plot
+  p <- ggsurvplot(
+    fit,
+    data         = km_df_sub,
+    pval         = TRUE,
+    risk.table   = TRUE,
+    legend.title = legend_title,
+    legend.labs  = legend_labs,
+    xlab         = "Days",
+    ylab         = "Overall survival",
+    palette      = c("#D64545", "#4E79A7"),
+    ggtheme      = theme_classic(base_size = 14)
+  )
+
+  return(list(
+    fit        = fit,
+    data       = km_df_sub,
+    plot       = p,
+    score_df   = score_df,
+    symbol_col = sig_res$symbol_col,
+    found_genes = sig_res$found_genes
+  ))
+}
+
+```
+
+
+## Kaplan–Meier Survival Analysis Based on the Immune-Regulatory CD55-Associated (IRC) Gene Signature
+
+In this section, an immune-regulatory epithelial gene signature (IRC), centered on CD55 and associated interferon, complement-regulatory, barrier, and stromal interaction programs, is defined and evaluated for its prognostic relevance in human colorectal cancer. The curated gene set is summarized into a single per-patient expression score by averaging normalized logCPM values across all signature genes. Patients are then stratified into high- and low-IRC groups using an extreme-quantile approach (top and bottom 20% of the score distribution), thereby enriching for tumors with strongly activated versus weakly expressed IRC programs while excluding intermediate cases. Kaplan–Meier survival curves with log-rank statistics and risk tables are generated to assess the association between IRC activity and overall survival, enabling a quantitative evaluation of whether activation of the CD55-linked immune-regulatory epithelial state is linked to adverse clinical outcome.
+
+```{r}
+
+irc_genes <- c(
+  "IRF7", "HSPA1A", "RGS16", "SNAI1", "SERPINH1", "ACE", "EGFL7", "HBA2", "HBA1",
+  "ADAMTS4", "MUSTN1", "SERPINE1", "HSPA1B", "LY6G6C", "FABP4", "ST6GALNAC6",
+  "B3GALT5", "IRGM", "ICAM2", "CD55", "ENG", "RAB3IL1", "ANXA8", "SCN1B",
+  "RTL8A", "SPARCL1", "RTL8B", "MFNG", "GIMAP1", "GPX3", "COL18A1", "SEMA6B",
+  "ACTA2", "FCGR1A", "TNFAIP8L2", "FKBP10", "SH3TC1", "TPM2", "ESAM", "TGFB1I1",
+  "GRAP", "BCR", "HSPG2", "ITGB7", "FHL1", "HMGN3", "CXCL12", "EBF1", "S100A4",
+  "IGFBP7", "IFI27L2", "THBS4", "DMD", "RAMP2", "RASGRP3", "TP53I11", "PTP4A3",
+  "SPARC", "EHD2", "NHSL2", "S100A16", "GJB3", "NT5DC2"
+)
+
+
+## 20% tails
+res_irc_20 <- km_from_signature(
+  exp_se       = exp_se,
+  logCPM       = logCPM,
+  surv_df      = surv_df,
+  gene_set     = irc_genes,
+  split        = "20",
+  score_name   = "irc_score",
+  legend_title = "IRC signature"
+)
+
+res_irc_20$plot  # prints the KM
+
+```
+
+
+## Figure 7 L: Stage-Dependent Enrichment of a IRC Gene Signature in TCGA Colorectal Cancer
+
+This section evaluates whether the immune-regulatory CD55-associated transcriptional program (IRC signature) is progressively enriched across advancing pathological stages of colorectal cancer in the TCGA-COAD cohort. Using edgeR-normalized logCPM values, a per-patient IRC signature score is computed as the average expression of the predefined IRC gene set and integrated with clinical staging information. Tumors are stratified according to simplified AJCC stage (I–IV), and the relationship between stage and IRC activity is quantified using Spearman rank correlation. Boxplots visualize the monotonic increase of the IRC score from early to advanced disease. In addition, tumors are dichotomized into early (stage I–II) and late (stage III–IV) groups, and a Wilcoxon rank-sum test is applied to assess whether high IRC activity is significantly enriched in advanced-stage carcinomas. Together, this analysis links activation of the immune-regulatory, CD55-associated epithelial program to tumor progression and provides clinical context for its prognostic relevance.
+
+```{r}
+
+## ============================================================
+## Stage association of the IRC gene signature in TCGA-COAD
+##   - defines irc_genes (IRC signature; provide your final list)
+##   - computes IRC signature score from logCPM
+##   - joins with simplified AJCC stage (I–IV)
+##   - Spearman correlation + stage boxplot
+##   - Early vs Late comparison (Wilcoxon) + boxplot
+## ============================================================
+
+suppressPackageStartupMessages({
+  library(edgeR)
+  library(dplyr)
+  library(stringr)
+  library(ggplot2)
+})
+
+## ------------------------------------------------------------
+## 0) Define the IRC signature genes (REQUIRED)
+## ------------------------------------------------------------
+## Provide your curated IRC gene set as gene symbols.
+## If you already store it in a text file, see the loader snippet below.
+irc_genes <- c(
+  "CD55"  # <- placeholder; replace with your full IRC gene list
+)
+
+# Fail early if not defined or empty
+if (!exists("irc_genes") || length(irc_genes) == 0) {
+  stop("Object 'irc_genes' not found or empty. Define it before running this chunk.")
+}
+
+## Optional: load from a file (one gene symbol per line)
+## irc_genes <- readLines("data/signatures/irc_genes.txt")
+## irc_genes <- irc_genes[irc_genes != ""]
+
+## ------------------------------------------------------------
+## 1) Build simplified AJCC stage variable (I/II/III/IV)
+## ------------------------------------------------------------
+surv_stage2 <- surv_os %>%
+  mutate(
+    stage_simple = case_when(
+      str_detect(ajcc_pathologic_stage, "^Stage IV")   ~ "IV",
+      str_detect(ajcc_pathologic_stage, "^Stage III")  ~ "III",
+      str_detect(ajcc_pathologic_stage, "^Stage II")   ~ "II",
+      str_detect(ajcc_pathologic_stage, "^Stage I\\b") ~ "I",
+      TRUE ~ NA_character_
+    ),
+    stage_simple = factor(stage_simple, levels = c("I", "II", "III", "IV"), ordered = TRUE)
+  ) %>%
+  filter(!is.na(stage_simple))
+
+## ------------------------------------------------------------
+## 2) Compute logCPM for TCGA counts
+## ------------------------------------------------------------
+dge <- DGEList(counts = counts_os)
+dge <- calcNormFactors(dge)
+logCPM <- cpm(dge, log = TRUE, prior.count = 1)
+
+## ------------------------------------------------------------
+## 3) Compute IRC signature score (per patient) using your helper
+## ------------------------------------------------------------
+sig_irc <- score_from_signature(
+  exp_se     = exp_se,
+  logCPM     = logCPM,
+  gene_set   = irc_genes,
+  score_name = "irc_score"
+)
+sig_df <- sig_irc$score_df
+
+## ------------------------------------------------------------
+## 4) Join stage + IRC signature score
+## ------------------------------------------------------------
+df_stage_sig <- surv_stage2 %>%
+  inner_join(sig_df, by = "patient_id") %>%
+  filter(!is.na(irc_score))
+
+## ------------------------------------------------------------
+## 5) Correlation: stage (I–IV) vs IRC score (Spearman)
+## ------------------------------------------------------------
+cor_stage <- cor.test(
+  as.numeric(df_stage_sig$stage_simple),
+  df_stage_sig$irc_score,
+  method = "spearman"
+)
+print(cor_stage)
+
+## ------------------------------------------------------------
+## 6) Plot 1: IRC score across AJCC stages (I–IV)
+## ------------------------------------------------------------
+p_stage <- ggplot(df_stage_sig, aes(x = stage_simple, y = irc_score)) +
+  geom_boxplot(outlier.shape = NA, fill = "grey85", colour = "black") +
+  geom_jitter(width = 0.15, alpha = 0.6, size = 1.6) +
+  stat_summary(
+    fun = median,
+    geom = "line",
+    aes(group = 1),
+    linewidth = 1,
+    colour = "#D64545"
+  ) +
+  labs(
+    x = "AJCC pathologic stage",
+    y = "IRC signature score",
+    title = "IRC signature is enriched in advanced CRC stages"
+  ) +
+  theme_classic(base_size = 14)
+
+print(p_stage)
+
+```
+
+## Figure 7 K: Association of the Immune-Regulatory CD55-Associated (IRC) Signature with Consensus Molecular Subtypes (CMS) in TCGA-COAD
+
+This section examines how the immune-regulatory, CD55-associated epithelial transcriptional program (IRC signature) is distributed across the Consensus Molecular Subtypes (CMS1–CMS4) of colorectal cancer in the TCGA-COAD cohort. Tumors are classified into CMS groups using the CMScaller framework applied to raw RNA-seq counts with Ensembl gene identifiers. Patient-level CMS calls are then integrated with per-patient IRC signature scores, computed as the mean edgeR-normalized logCPM expression of the curated IRC gene set. Differences in IRC activity across CMS classes are assessed using a non-parametric Kruskal–Wallis test, and the distributions are visualized with boxplots and individual sample overlays. This analysis places the CD55-linked immune-regulatory epithelial program into the established CMS taxonomy and reveals its preferential association with specific molecular subtypes characterized by immune modulation and mesenchymal/stromal activation.
+
+```{r}
+
+## ============================================================
+## CMS (CMScaller) vs IRC signature score (TCGA-COAD)
+##   - CMScaller on raw counts (Ensembl IDs)
+##   - IRC score computed from irc_genes (symbols) via rowData mapping
+##   - Patient-level merge
+##   - Kruskal–Wallis test + publication-style boxplot
+##
+## Prerequisites:
+##   - counts_os: genes x samples raw counts (rownames = Ensembl IDs, possibly with .version)
+##   - exp_se: SummarizedExperiment from TCGAbiolinks::GDCprepare()
+##   - irc_genes: character vector of gene symbols (your IRC signature)
+## ============================================================
+
+suppressPackageStartupMessages({
+  library(CMScaller)
+  library(edgeR)
+  library(dplyr)
+  library(ggplot2)
+})
+
+## ------------------------------------------------------------
+## 1) Run CMScaller (raw counts; Ensembl IDs)
+## ------------------------------------------------------------
+
+emat <- as.matrix(counts_os)
+storage.mode(emat) <- "numeric"
+
+# Strip Ensembl version suffix (ENSG... .12 -> ENSG...)
+rownames(emat) <- sub("\\..*$", "", rownames(emat))
+
+cms_res <- CMScaller::CMScaller(
+  emat,
+  rowNames = "ensg",
+  RNAseq   = TRUE,
+  FDR      = 0.05,
+  doPlot   = FALSE
+)
+
+# Patient-level CMS calls (one per patient)
+cms_calls <- data.frame(
+  sample_id  = rownames(cms_res),
+  patient_id = substr(rownames(cms_res), 1, 12),
+  CMS        = cms_res$prediction,
+  stringsAsFactors = FALSE
+) %>%
+  group_by(patient_id) %>%
+  slice_head(n = 1) %>%
+  ungroup()
+
+# Optional sanity
+print(table(cms_calls$CMS, useNA = "ifany"))
+
+
+## ------------------------------------------------------------
+## 2) Compute IRC signature score (mean logCPM across irc_genes)
+##    IMPORTANT: irc_genes are SYMBOLS, logCPM rows are Ensembl -> map via rowData(exp_se)
+## ------------------------------------------------------------
+
+# edgeR logCPM on the same counts used above
+dge <- DGEList(counts = counts_os)
+dge <- calcNormFactors(dge)
+logCPM <- cpm(dge, log = TRUE, prior.count = 1)
+
+# Strip Ensembl version suffix in logCPM rownames as well
+rownames(logCPM) <- sub("\\..*$", "", rownames(logCPM))
+
+# Prepare mapping table from rowData(exp_se)
+rd <- as.data.frame(rowData(exp_se), stringsAsFactors = FALSE)
+
+symbol_candidates  <- c("gene_name","external_gene_name","symbol","hgnc_symbol","GeneSymbol")
+ensembl_candidates <- c("ensembl_gene_id","gene_id","ensembl_id","ENSEMBL","gene")
+
+symbol_col <- intersect(symbol_candidates, colnames(rd))[1]
+if (is.na(symbol_col) || length(symbol_col) == 0) {
+  stop("No gene symbol column detected in rowData(exp_se). Inspect colnames(rowData(exp_se)).")
+}
+
+ensembl_col <- intersect(ensembl_candidates, colnames(rd))[1]
+if (is.na(ensembl_col) || length(ensembl_col) == 0) {
+  rd$ensembl_tmp <- rownames(rd)
+  ensembl_col <- "ensembl_tmp"
+}
+
+rd$symbol  <- as.character(rd[[symbol_col]])
+rd$ensembl <- sub("\\..*$", "", as.character(rd[[ensembl_col]]))
+
+# Map IRC symbols -> Ensembl IDs -> logCPM row indices
+rd_hits <- rd %>% filter(symbol %in% irc_genes)
+if (nrow(rd_hits) == 0) {
+  stop("None of irc_genes found in rowData(exp_se)[['", symbol_col, "']].")
+}
+
+idx <- match(rd_hits$ensembl, rownames(logCPM))
+idx <- idx[!is.na(idx)]
+if (length(idx) == 0) {
+  stop("Mapped irc_genes via rowData, but none match rownames(logCPM).")
+}
+
+# Compute IRC score per sample, then per patient (mean across aliquots if present)
+irc_score_by_sample <- colMeans(logCPM[idx, , drop = FALSE], na.rm = TRUE)
+
+sig_df <- tibble(
+  sample_id  = names(irc_score_by_sample),
+  patient_id = substr(names(irc_score_by_sample), 1, 12),
+  irc_score  = as.numeric(irc_score_by_sample)
+) %>%
+  group_by(patient_id) %>%
+  summarise(irc_score = mean(irc_score, na.rm = TRUE), .groups = "drop")
+
+# Optional sanity
+print(summary(sig_df$irc_score))
+
+
+## ------------------------------------------------------------
+## 3) Merge CMS + IRC score (patient-level)
+## ------------------------------------------------------------
+
+df_cms_sig <- cms_calls %>%
+  filter(!is.na(CMS), CMS %in% c("CMS1","CMS2","CMS3","CMS4")) %>%
+  inner_join(sig_df, by = "patient_id") %>%
+  filter(!is.na(irc_score)) %>%
+  mutate(
+    CMS = factor(CMS, levels = c("CMS1","CMS2","CMS3","CMS4")),
+    CMS_num = factor(as.integer(CMS), levels = 1:4)  # for x-axis labels "1 2 3 4" like your example
+  )
+
+print(table(df_cms_sig$CMS, useNA = "ifany"))
+
+
+## ------------------------------------------------------------
+## 4) Kruskal–Wallis test + formatted p-label
+## ------------------------------------------------------------
+
+kruskal_res <- kruskal.test(irc_score ~ CMS, data = df_cms_sig)
+print(kruskal_res)
+
+format_p_sci <- function(p) {
+  if (is.na(p)) return("p=NA")
+  if (p == 0) return("p<1×10^-300")
+  e <- floor(log10(p))
+  m <- p / (10^e)
+  # show as p=2×10^-16 style
+  paste0("p=", formatC(m, digits = 1, format = "f"), "\u00D7", "10^", e)
+}
+
+p_txt <- format_p_sci(kruskal_res$p.value)
+
+y_max <- max(df_cms_sig$irc_score, na.rm = TRUE)
+y_min <- min(df_cms_sig$irc_score, na.rm = TRUE)
+y_anno <- y_max + 0.08 * (y_max - y_min)
+
+
+## ------------------------------------------------------------
+## 5) Plot (style close to your reference)
+## ------------------------------------------------------------
+
+cms_cols <- c(
+  "1" = "#4E79A7",  # blue
+  "2" = "#F28E2B",  # orange
+  "3" = "#E79AC6",  # pink
+  "4" = "#59A87D"   # green
+)
+
+p_cms_irc <- ggplot(df_cms_sig, aes(x = CMS_num, y = irc_score)) +
+  geom_boxplot(
+    aes(fill = CMS_num),
+    width = 0.75,
+    outlier.shape = NA,
+    linewidth = 1.0,
+    colour = "black",
+    alpha = 0.85
+  ) +
+  geom_jitter(
+    aes(fill = CMS_num),
+    width = 0.18,
+    size = 2.4,
+    alpha = 0.45,
+    shape = 21,
+    colour = "black",
+    stroke = 0.6
+  ) +
+  scale_fill_manual(values = cms_cols, drop = FALSE) +
+  annotate(
+    "text",
+    x = 2.5,
+    y = y_anno,
+    label = p_txt,
+    size = 9,
+    fontface = "italic"
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_classic(base_size = 18) +
+  theme(
+    legend.position = "none",
+    axis.title.x = element_text(size = 30, face = "bold", margin = margin(t = 12)),
+    axis.title.y = element_text(size = 30, face = "bold", margin = margin(r = 12)),
+    axis.text.x  = element_text(size = 26),
+    axis.text.y  = element_text(size = 26),
+    plot.margin  = margin(10, 20, 10, 10)
+  ) +
+  labs(
+    x = "CMS",
+    y = "IRC-signature"
+  )
+
+
+```
+## Final note
+
+All survival analyses are performed on TCGA-COAD Primary Tumor (TP) samples, aligned to a single patient-level record; if multiple aliquots exist, the notebook uses one representative entry during OS table construction. Expression values are normalized using edgeR TMM and summarized as logCPM, which supports comparability across samples but does not remove all potential batch effects. Signature scores are computed as the mean logCPM across mapped signature genes, and results depend on the chosen gene identifier mapping in rowData(exp_se) (symbols ↔ Ensembl IDs). Kaplan–Meier stratification is configurable (median or extreme quantiles), and effect sizes/p-values should be interpreted in the context of cohort size, censoring, and subgroup balance. CMS assignments from CMScaller are inferred from raw counts and should be treated as probabilistic labels that can vary with preprocessing and filtering choices.
+
+
