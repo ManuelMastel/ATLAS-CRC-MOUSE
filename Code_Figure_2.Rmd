@@ -1,0 +1,699 @@
+---
+title: "Figure 2 – Integrated single-cell atlas of colorectal tumor ecosystems across genotypes and stages"
+author: Manuel Mastel
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  results = "hide",   # hide printed text, keep plots
+  fig.align = "center",
+  fig.width = 12,
+  fig.height = 7
+)
+
+```
+
+## Figure 2 – Integrated single-cell atlas of colorectal tumor ecosystems across genotypes and stages
+
+**Description:**  
+This notebook reproduces all analyses and visualizations underlying **Figure 2**, which provides a systems-level view of cellular composition, lineage structure, and genotype-dependent remodeling of the colorectal tumor microenvironment using single-cell RNA sequencing.
+
+The figure integrates the following analytical layers:
+
+### 1. Tumor progression mapping (Fig. 2b)
+- UMAP visualization of epithelial and stromal cells colored by histopathological stage (normal tissue, adenoma, carcinoma).
+- Illustrates continuous transcriptional transitions during malignant progression.
+
+### 2. Cell-type atlas and annotation (Fig. 2c)
+- High-resolution clustering of all cell populations.
+- Annotation into epithelial, immune, stromal, and vascular compartments.
+- Separate legend rendering for publication-grade layout.
+
+### 3. Genotype-dependent ecosystem composition (Fig. 2d)
+- Stacked barplots quantifying relative abundance of major cellular lineages:
+  - Epithelial  
+  - Myeloid  
+  - Neutrophils  
+  - Lymphoid (T/NK/ILC, B cells)  
+  - Stromal  
+  - Endothelial
+- Comparison across genetically engineered tumor models.
+
+### 4. Compositional PCA of tumor models (Fig. 2e)
+- Principal component analysis of per-model cell-type proportions.
+- Reveals genotype-driven organization of tumor ecosystems in low-dimensional space.
+
+### 5. Inter-model similarity structure (Fig. 2f)
+- Pairwise distances between tumor models in PCA space.
+- Summarizes global similarities and divergences in cellular composition.
+
+Together, these analyses define how oncogenic genotypes and tumor stage jointly sculpt the cellular architecture of colorectal cancer, providing a quantitative framework linking genetic drivers to ecosystem-level immune and stromal remodeling.
+
+
+
+
+
+## General preparation: Load packages and ATLAS Seurat object
+
+**Description:**  
+This section initializes the analysis environment by loading all R packages required to reproduce the figure panels in this notebook.  
+`Seurat` is used for single-cell data handling and UMAP visualization, `dplyr` and `tidyr` for tidy metadata manipulation, and `ggplot2` for custom publication-quality plotting.  
+Additional packages provide specialized functionality: `plyr` for cluster relabeling, `cowplot` and `grid` for legend extraction and layout control, `ggsci` for discrete color palettes, and `corrplot` for visualizing inter-model distances.
+
+The integrated single-cell atlas is then loaded from disk and stored as `atlas`.
+
+**Inputs:**
+- R packages: `Seurat`, `dplyr`, `tidyr`, `ggplot2`, `plyr`, `cowplot`, `grid`, `ggsci`, `corrplot`
+- Serialized Seurat object: `ATLAS.rds`
+
+**Output:**
+- `atlas`: Seurat object containing the integrated tumor atlas used for all downstream analyses.
+
+```{r}
+
+## ============================================================
+## General preparation: libraries + load integrated ATLAS object
+## ============================================================
+
+suppressPackageStartupMessages({
+  library(Seurat)    # single-cell object handling and DimPlot
+  library(dplyr)     # metadata wrangling
+  library(tidyr)     # pivot_wider for composition matrices
+  library(ggplot2)   # custom plotting
+  library(plyr)      # mapvalues for cluster relabeling
+  library(cowplot)   # legend extraction
+  library(grid)      # grob drawing
+  library(ggsci)     # color palettes
+  library(corrplot)  # distance matrix visualization
+})
+
+# Load the integrated atlas Seurat object used throughout the notebook
+atlas <- readRDS("ATLAS.rds")
+
+```
+
+
+## Figure 2B – Tumor stage annotation on the global atlas UMAP
+
+**Description:**  
+This panel visualizes the global atlas UMAP and overlays a simplified histopathological stage annotation per cell. Tumor stage is inferred from `tumor_model` using a rule-based mapping (Colon-WT → *Normal tissue*, VA → *Adenoma*, all remaining tumor models → *Carcinoma*).  
+
+To maximize visual clarity, points are plotted in layers so that the most abundant malignant compartment (*Carcinoma*) is drawn first with higher transparency, while *Adenoma* and *Normal tissue* are drawn on top with increased opacity. This improves visibility of minor populations without distorting the underlying global structure.
+
+**Inputs:**
+- `tumor_only`: Seurat object containing the atlas subset used for Fig. 2
+- Metadata columns required in `atlas@meta.data`:
+  - `tumor_model`
+- Dimensionality reductions required:
+  - `umap`
+
+**Output:**
+- `p`: ggplot object showing UMAP colored by tumor stage (Normal tissue / Adenoma / Carcinoma)
+
+```{r}
+
+## ============================================================
+## Figure 2B: UMAP colored by tumor stage (Normal → Adenoma → Carcinoma)
+## ============================================================
+
+library(dplyr)
+library(ggplot2)
+library(Seurat)
+
+## -----------------------------
+## 0) Start from Seurat metadata
+## -----------------------------
+# Extract meta.data so we can add a derived annotation cleanly
+md <- atlas@meta.data
+
+## -----------------------------
+## 1) Derive tumor stage from tumor_model
+## -----------------------------
+# Rule-based mapping:
+# - VA is treated as Adenoma
+# - Colon-WT is treated as Normal tissue
+# - all remaining tumor models are treated as Carcinoma
+md$tum_stage <- dplyr::case_when(
+  md$tumor_model == "VA"       ~ "Adenoma",
+  md$tumor_model == "Colon-WT" ~ "Normal tissue",
+  TRUE                         ~ "Carcinoma"
+)
+
+# Fix factor order so legends and plotting order are consistent
+md$tum_stage <- factor(md$tum_stage, levels = c("Carcinoma", "Adenoma", "Normal tissue"))
+
+# Write the derived annotation back to the Seurat object
+atlas@meta.data <- md
+
+## -----------------------------
+## 2) Build a plotting data.frame from UMAP + metadata
+## -----------------------------
+# Extract UMAP coordinates (one row per cell)
+umap_df <- as.data.frame(Embeddings(atlas, reduction = "umap"))
+colnames(umap_df) <- c("x", "y")
+umap_df$cell <- rownames(umap_df)
+
+# Join in the tumor stage annotation using cell barcodes as key
+umap_df <- umap_df %>%
+  left_join(
+    md %>% mutate(cell = rownames(md)) %>% select(cell, tum_stage),
+    by = "cell"
+  )
+
+# Safety check: confirm all cells received a stage label
+if (any(is.na(umap_df$tum_stage))) {
+  warning("Some cells have missing tumor stage after join. Check tumor_model or rowname alignment.")
+}
+
+## -----------------------------
+## 3) Define stage colors (Nature-style)
+## -----------------------------
+cols_stage <- c(
+  "Normal tissue" = "#3B9AB2",  # teal (healthy)
+  "Adenoma"       = "#EAC435",  # warm yellow (intermediate)
+  "Carcinoma"     = "#D1495B"   # deep red (malignant)
+)
+
+# Enforce factor order in plotting table
+umap_df$tum_stage <- factor(umap_df$tum_stage, levels = c("Carcinoma", "Adenoma", "Normal tissue"))
+
+## -----------------------------
+## 4) Layered UMAP plotting
+## -----------------------------
+# Plot carcinoma first (faint background),
+# then adenoma and normal tissue on top (higher opacity)
+p <- ggplot() +
+  geom_point(
+    data  = subset(umap_df, tum_stage == "Carcinoma"),
+    aes(x = x, y = y, color = tum_stage),
+    size  = 0.40,
+    alpha = 0.35
+  ) +
+  geom_point(
+    data  = subset(umap_df, tum_stage == "Adenoma"),
+    aes(x = x, y = y, color = tum_stage),
+    size  = 0.10,
+    alpha = 0.90
+  ) +
+  geom_point(
+    data  = subset(umap_df, tum_stage == "Normal tissue"),
+    aes(x = x, y = y, color = tum_stage),
+    size  = 0.10,
+    alpha = 0.95
+  ) +
+  scale_color_manual(values = cols_stage, name = "Tumor stage") +
+  coord_equal() +
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 12),
+    legend.text  = element_text(size = 10),
+    axis.title = element_blank()
+  ) +
+  ggtitle("UMAP: Normal tissue → Adenoma → Carcinoma")
+
+p
+
+
+```
+
+## Figure 2C – Cell-type annotated atlas UMAP with cluster-preserving colors
+
+**Description:**  
+This panel visualizes the global atlas UMAP colored by curated cell-type annotations derived from unsupervised Seurat clusters. Numerical cluster IDs are mapped to biologically interpretable cell identities (epithelial subtypes, myeloid and neutrophil populations, lymphoid compartments, stromal cells, and endothelial cells).  
+
+To preserve continuity with the original clustering, each annotated label inherits the color of its underlying Seurat cluster ID (rather than recoloring by broad compartment). The UMAP is exported *without* a legend to keep the panel clean, and the legend is extracted and plotted separately for flexible figure layout.
+
+**Inputs:**
+- `atlas`: Seurat object containing the atlas subset used for Fig. 2  
+- Metadata columns required in `atlas@meta.data`:
+  - `seurat_clusters`  
+- Dimensionality reductions required:
+  - `umap`
+
+**Output:**
+- `p_umap_noleg`: UMAP ggplot object colored by `cluster_name` (legend removed)  
+- `legend_plot`: legend-only ggplot extracted from the same UMAP
+
+
+```{r}
+
+## ============================================================
+## Figure 2C: Atlas UMAP colored by annotated cluster names
+## Output as TWO plots:
+##   (1) UMAP without legend
+##   (2) Legend only
+## ============================================================
+
+library(Seurat)
+library(plyr)     # for mapvalues()
+library(ggplot2)
+library(cowplot)  # for get_legend() / ggdraw()
+library(grid)     # for grid.newpage() / grid.draw()
+
+## ------------------------------------------------------------
+## 1) Base colors (cluster 0..33 → index 1..34)
+##    These preserve the original cluster-ID color identity.
+## ------------------------------------------------------------
+base_cols <- c(
+  "#E76F51", "#2A9D8F", "#E9C46A", "#F4A261", "#264653",
+  "#8AB17D", "#5C53A5", "#D264B6", "#6D597A", "blue4",
+  "#4CC9F0", "#560BAD", "#FF6D00", "#43AA8B", "#F94144",
+  "#577590", "#90BE6D", "#277DA1", "#EE964B", "#F8961E",
+  "#A05195", "#2F4B7C", "#BC5090", "#F3722C", "#06D6A0",
+  "#118AB2", "#073B4C", "#C9ADA7", "#84A59D", "#F28482",
+  "#7F4F24", "#9A8C98", "#B56576", "#3A86FF"
+)
+
+## ------------------------------------------------------------
+## 2) Cluster ID → biological annotation map
+##    (keys must match atlas$seurat_clusters values)
+## ------------------------------------------------------------
+cluster_names <- c(
+  `0`  = "Epi–WNT-modulating fetal-like (Apcdd1+/Notum+)",
+  `1`  = "Epi–Basal/squamous-like (Krt14+)",
+  `2`  = "B cells",
+  `3`  = "Neutrophils",
+  `4`  = "Macrophages–SPP1+ remodeling TAMs",
+  `5`  = "Monocytes–inflammatory (Ly6C+)",
+  `6`  = "T cells–activated CD4 (Treg-proximal)",
+  `7`  = "Endothelial cells",
+  `8`  = "Epi–Absorptive enterocyte-like",
+  `9`  = "Epi–Crypt progenitor / stem-like (Ascl2+)",
+  `10` = "Cycling cells–epithelial (G2/M)",
+  `11` = "Macrophages–C1q+/Folr2+ resident",
+  `12` = "T/NK–cytotoxic (CD8+/Nkg7+)",
+  `13` = "Dendritic cells–cDC2 (Cd209a+)",
+  `14` = "Fibroblasts–inflammatory CAF (iCAF)",
+  `15` = "Macrophages–inflammatory (M1-like)",
+  `16` = "Fibroblasts–matrix CAF (myCAF, Cthrc1+)",
+  `17` = "Pericytes / mural cells (Rgs5+)",
+  `18` = "Dendritic cells–migratory (Fscn1+)",
+  `19` = "Macrophages–Mrc1+/Apoe+ (M2-like)",
+  `20` = "Epi–Goblet / secretory",
+  `21` = "Epi–WNT-high Prox1+ transitional",
+  `22` = "Epi–Enteroendocrine / neuroendocrine",
+  `23` = "Neutrophils–activated",
+  `24` = "T cells–regulatory (Foxp3+)",
+  `25` = "Epi–Ductal-like regenerative (Onecut1+)",
+  `26` = "Cycling cells–mixed (G2/M–1)",
+  `27` = "Cycling cells–mixed (G2/M–2)",
+  `28` = "Epi–Tuft cells (Trpm5+/Dclk1+)",
+  `29` = "Epi–Injury-associated squamous-like",
+  `30` = "Pericytes / mural cells–2",
+  `31` = "Smooth muscle cells",
+  `32` = "Plasma cells"
+)
+
+## ------------------------------------------------------------
+## 3) Add the annotation as a new metadata column in atlas
+## ------------------------------------------------------------
+# Convert clusters to character to ensure exact matching to names(cluster_names)
+atlas$cluster_name <- plyr::mapvalues(
+  x    = as.character(atlas$seurat_clusters),
+  from = names(cluster_names),
+  to   = unname(cluster_names)
+)
+
+# Lock factor levels so legend order is stable and reproducible
+atlas$cluster_name <- factor(atlas$cluster_name, levels = unname(cluster_names))
+
+## ------------------------------------------------------------
+## 4) Build named color vector for annotated labels
+##    (keeps original cluster colors by mapping ID -> base_cols)
+## ------------------------------------------------------------
+ids  <- as.integer(names(cluster_names))  # e.g. 0..32
+labs <- unname(cluster_names)
+
+cols_for_labels <- setNames(
+  base_cols[ids + 1L],  # +1 because R vectors are 1-based
+  labs
+)
+
+# Drop labels not present (in case atlas was subsetted)
+present_labs <- intersect(levels(atlas$cluster_name), names(cols_for_labels))
+cols_use <- cols_for_labels[present_labs]
+
+## ------------------------------------------------------------
+## 5) Create plot with legend, then split into:
+##    (a) UMAP without legend
+##    (b) legend only
+## ------------------------------------------------------------
+p_umap <- DimPlot(
+  atlas,
+  group.by   = "cluster_name",
+  cols       = cols_use,
+  label      = FALSE,
+  raster     = FALSE
+) +
+  theme_classic() +
+  ggtitle("scRNA-seq atlas – clusters colored by original IDs, labeled by cell type") +
+  theme(
+    plot.title   = element_text(hjust = 0.5),
+    legend.title = element_blank()
+  )
+
+## 5a) UMAP only
+p_umap_noleg <- p_umap + theme(legend.position = "none")
+p_umap_noleg
+
+## 5b) Legend only (as its own plot)
+p_umap_with_legend <- p_umap +
+  theme(
+    legend.position = "right",
+    legend.text     = element_text(size = 10)
+  ) +
+  guides(color = guide_legend(override.aes = list(size = 4, alpha = 1)))
+
+legend_grob <- cowplot::get_legend(p_umap_with_legend)
+
+p_umap_legend <- cowplot::ggdraw(legend_grob)
+p_umap_legend
+
+```
+
+
+## Figure 2E – PCA of tumor models based on global cell-type composition
+
+**Description:**
+This panel summarizes how tumor models differ in their global cellular composition by performing principal component analysis (PCA) on cell-type proportion vectors. Cell-type counts per sample are first aggregated to the tumor-model level and normalized to proportions, such that each tumor model is represented by a vector describing the relative abundance of the major cellular compartments. 
+
+These composition vectors are converted into a wide matrix (rows = tumor_model, columns = cell_types) and used as input for **prcomp**. The resulting PCA embedding (PC1 and PC2) visualizes similarity and divergence between tumor models in terms of their immune, stromal, and epithelial composition, with axis labels reporting the fraction of variance explained. 
+
+For figure assembly, the PCA scatter is rendered without a legend, and the legend is extracted and displayed as a separate panel to allow flexible layout in the final multi-panel figure.
+
+**Inputs:**
+* **df_prop_hash**: long-format table of cell-type counts per sample
+    * Required columns: `hash.ID`, `tumor_model`, `cell_types`, `n`
+* **R packages**: `dplyr`, `tidyr`, `ggplot2`, `cowplot`
+* **Dimensionality reduction method**: `prcomp` (PCA on tumor-model-level cell-type proportions)
+
+**Output:**
+* **p_pca_plot**: ggplot object showing the PCA of tumor models colored by tumor_model (legend suppressed)
+* **legend_plot**: ggdraw object containing the extracted legend only
+
+
+```{r}
+
+
+## ============================================================
+## PCA of tumor models by cell-type composition
+## Works if atlas is:
+##   - Seurat object (uses atlas@meta.data), OR
+##   - data.frame/tibble (uses atlas directly)
+## Output as TWO ggplots:
+##   (1) PCA scatter (no legend)
+##   (2) Legend only
+## ============================================================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+  library(cowplot)
+})
+
+## ------------------------------------------------------------
+## 0) Make sure plyr is not masking dplyr (VERY common issue)
+## ------------------------------------------------------------
+if ("package:plyr" %in% search()) detach("package:plyr", unload = TRUE)
+
+## ------------------------------------------------------------
+## 1) Get per-cell annotation table (meta) from atlas
+## ------------------------------------------------------------
+stopifnot(exists("atlas"))
+
+if (inherits(atlas, "Seurat")) {
+  meta <- atlas@meta.data
+} else if (is.data.frame(atlas)) {
+  meta <- atlas
+} else {
+  stop("atlas must be a Seurat object or a data.frame/tibble.")
+}
+
+req_cols <- c("hash.ID", "tumor_model", "cell_types")
+miss_cols <- setdiff(req_cols, colnames(meta))
+if (length(miss_cols) > 0) {
+  stop("atlas meta table is missing required columns: ", paste(miss_cols, collapse = ", "))
+}
+
+## ------------------------------------------------------------
+## 2) Proportions per hash.ID (sample)  --> df_prop_hash
+##    (matches your style: data.frame(...) + dplyr pipeline)
+## ------------------------------------------------------------
+df_prop_hash <- data.frame(
+  hash.ID     = meta$hash.ID,
+  cell_types  = meta$cell_types,
+  tumor_model = meta$tumor_model
+) %>%
+  dplyr::mutate(
+    hash.ID     = as.character(hash.ID),
+    cell_types  = as.character(cell_types),
+    tumor_model = as.character(tumor_model)
+  ) %>%
+  dplyr::filter(!is.na(hash.ID), !is.na(cell_types), !is.na(tumor_model)) %>%
+  dplyr::group_by(hash.ID, tumor_model, cell_types) %>%
+  dplyr::summarise(n = dplyr::n(), .groups = "drop_last") %>%
+  dplyr::mutate(prop = n / sum(n)) %>%
+  dplyr::ungroup()
+
+## Order hash.IDs by tumor_model, then hash.ID
+sample_order <- df_prop_hash %>%
+  dplyr::distinct(hash.ID, tumor_model) %>%
+  dplyr::arrange(tumor_model, hash.ID) %>%
+  dplyr::pull(hash.ID)
+
+df_prop_hash$hash.ID <- factor(df_prop_hash$hash.ID, levels = sample_order)
+
+## Cell-type order and colors (kept for consistency with other panels)
+ct_levels2 <- c("Epithelial","Myeloid","Neutrophils","Bcells","TNKILC","Stromal","Endothelial")
+df_prop_hash$cell_types <- factor(as.character(df_prop_hash$cell_types), levels = ct_levels2)
+
+cols2 <- c(
+  Epithelial  = "#4E79A7",
+  Myeloid     = "#63A99B",
+  Neutrophils = "palegreen3",
+  Stromal     = "grey70",
+  Endothelial = "#E07BAA",
+  TNKILC      = "#8C8AC8",
+  Bcells      = "#D0B04F"
+)
+
+## Create a lookup: hash.ID -> tumor_model (sometimes useful downstream)
+id_to_model <- df_prop_hash %>%
+  dplyr::distinct(hash.ID, tumor_model) %>%
+  tibble::deframe()
+
+## ------------------------------------------------------------
+## 3) Tumor-model level composition table
+## ------------------------------------------------------------
+stopifnot(all(c("tumor_model","cell_types","n","prop") %in% colnames(df_prop_hash)))
+
+df_prop_model <- df_prop_hash %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(tumor_model, cell_types) %>%
+  dplyr::summarise(n = sum(n, na.rm = TRUE), .groups = "drop_last") %>%
+  dplyr::mutate(prop = n / sum(n, na.rm = TRUE)) %>%
+  dplyr::ungroup()
+
+## ------------------------------------------------------------
+## 4) Wide matrix for PCA: rows=tumor_model, cols=cell_types
+## ------------------------------------------------------------
+comp_mat_model <- df_prop_model %>%
+  dplyr::select(tumor_model, cell_types, prop) %>%
+  tidyr::pivot_wider(
+    names_from  = cell_types,
+    values_from = prop,
+    values_fill = 0
+  )
+
+mat_model_num <- as.matrix(comp_mat_model[, -1, drop = FALSE])
+rownames(mat_model_num) <- comp_mat_model$tumor_model
+
+## ------------------------------------------------------------
+## 5) PCA
+## ------------------------------------------------------------
+pca_model <- prcomp(mat_model_num, center = TRUE, scale. = FALSE)
+
+varPC1 <- summary(pca_model)$importance[2, 1]
+varPC2 <- summary(pca_model)$importance[2, 2]
+
+df_pca <- as.data.frame(pca_model$x[, 1:2, drop = FALSE])
+colnames(df_pca) <- c("PC1", "PC2")
+df_pca$tumor_model <- rownames(df_pca)
+
+## ------------------------------------------------------------
+## 6) Tumor-model order + palette (match your figure)
+## ------------------------------------------------------------
+ordered_models <- c(
+  "Colon-WT",
+  "VA","VAKP","VAKPS",
+  "VBP","VBPN","VBPNA","VBPNC",
+  "VKP","VKPN",
+  "AKP-BFP","AKPS-BFP","AKP",
+  "AKP-Arid1a","AKP-Atm","AKP-Atrx","AKP-Fbxw7",
+  "AKP-Smad4","AKP-Pten","AKP-Ptprt"
+)
+
+present_levels <- intersect(ordered_models, unique(df_pca$tumor_model))
+present_levels <- c(present_levels, setdiff(unique(df_pca$tumor_model), present_levels))
+df_pca$tumor_model <- factor(df_pca$tumor_model, levels = present_levels)
+
+pal_models_use <- setNames(
+  c(
+    "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2",
+    "#D55E00", "#CC79A7", "#000000", "#999999", "#D4B483",
+    "#4DBBD5", "#FF9DA7", "#8C564B", "#F7DC6F", "#6A3D9A",
+    "#1B9E77", "#E6AB02", "#7570B3", "#E7298A", "#66A61E",
+    "#A6761D", "#666666"
+  )[seq_along(levels(df_pca$tumor_model))],
+  levels(df_pca$tumor_model)
+)
+
+## ------------------------------------------------------------
+## 7) PCA plot (NO legend)
+## ------------------------------------------------------------
+p_pca_plot <- ggplot(df_pca, aes(PC1, PC2, color = tumor_model)) +
+  geom_point(size = 4.6, alpha = 0.95) +
+  scale_color_manual(values = pal_models_use, drop = FALSE) +
+  labs(
+    x = sprintf("PC1 (%.1f%%)", varPC1 * 100),
+    y = sprintf("PC2 (%.1f%%)", varPC2 * 100)
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.title = element_text(face = "bold", size = 13),
+    axis.text  = element_text(size = 11),
+    legend.position = "none"
+  )
+
+## ------------------------------------------------------------
+## 8) Legend-only plot
+## ------------------------------------------------------------
+p_pca_with_legend <- p_pca_plot +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 12)
+  ) +
+  guides(color = guide_legend(
+    ncol = 2,
+    override.aes = list(size = 5, alpha = 1)
+  ))
+
+p_pca_legend <- cowplot::get_legend(p_pca_with_legend)
+legend_plot  <- cowplot::ggdraw(p_pca_legend)
+
+## Print
+p_pca_plot
+
+
+legend_plot
+
+
+
+```
+
+## Figure 2F – Distance between tumor models in PC space (centroids)
+
+**Description:**
+This panel quantifies how far tumor models are separated in the PCA space from Figure 2E. For each tumor model, the PCA coordinates (PC1/PC2) are summarized by a centroid (mean PC1, mean PC2). Pairwise Euclidean distances between centroids are then computed (**dist**) and visualized as a lower-triangular distance heatmap using **corrplot** (with numeric distance annotations).
+
+**Inputs:**
+* **pca_df**: output from Figure 2E containing tumor model coordinates
+    * Required columns: `tumor_model`, `PC1`, `PC2`
+* **R packages**: `dplyr`, `corrplot`
+
+**Output:**
+* **centroids**: table of tumor-model centroids in PC space
+* **d_mat**: matrix of pairwise Euclidean distances
+* **Heatmap**: lower-triangular distance plot drawn via `corrplot`
+
+```{r}
+
+## ============================================================
+## Figure 2F – Distance between tumor models in PC space (centroids)
+## ============================================================
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(corrplot)
+})
+
+## ------------------------------------------------------------
+## 0) Input checks
+## ------------------------------------------------------------
+stopifnot(exists("df_pca"))
+stopifnot(all(c("tumor_model", "PC1", "PC2") %in% colnames(df_pca)))
+
+## Make sure types are sane
+df_pca <- df_pca %>%
+  mutate(
+    tumor_model = as.character(tumor_model),
+    PC1 = as.numeric(PC1),
+    PC2 = as.numeric(PC2)
+  )
+
+## ------------------------------------------------------------
+## 1) Centroids per tumor model
+## ------------------------------------------------------------
+centroids <- df_pca %>%
+  filter(!is.na(tumor_model)) %>%
+  group_by(tumor_model) %>%
+  summarise(
+    PC1 = mean(PC1, na.rm = TRUE),
+    PC2 = mean(PC2, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+centroids_mat <- as.matrix(centroids[, c("PC1", "PC2"), drop = FALSE])
+rownames(centroids_mat) <- centroids$tumor_model
+
+## ------------------------------------------------------------
+## 2) Pairwise distances between tumor-model centroids
+## ------------------------------------------------------------
+d <- dist(centroids_mat, method = "euclidean")
+d_mat <- as.matrix(d)
+
+## Optional: keep a consistent order (if df_pca$tumor_model is a factor)
+if (is.factor(df_pca$tumor_model)) {
+  lvl <- levels(df_pca$tumor_model)
+  keep <- intersect(lvl, rownames(d_mat))
+  d_mat <- d_mat[keep, keep, drop = FALSE]
+}
+
+## ------------------------------------------------------------
+## 3) Plot: lower triangle distance heatmap
+## ------------------------------------------------------------
+corrplot(
+  d_mat,
+  type        = "lower",
+  is.corr     = FALSE,
+  col.lim     = c(0, max(d_mat, na.rm = TRUE)),
+  addCoef.col = "grey55",
+  number.cex  = 0.6,
+  method      = "color"
+)
+
+
+```
+
+## Summary
+
+Single-cell–derived cell-type proportions were aggregated per tumor model and used for principal component analysis to compare global cellular composition across genotypes (Figure 2E). The PCA reveals genotype-dependent differences in epithelial, immune, and stromal compartment structure. Pairwise Euclidean distances between tumor-model centroids in PC space were then computed to quantify similarity between models (Figure 2F), highlighting groups with related microenvironmental architectures and models occupying distinct ecological states.
+
+
