@@ -1,0 +1,613 @@
+---
+title: "Figure 5 - ATLAS - IRC program and CD55 association"
+author: Manuel Mastel
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  results = "hide",   # hide printed text, keep plots
+  fig.align = "center",
+  fig.width = 12,
+  fig.height = 7
+)
+
+```
+
+**Description:**  
+This notebook contains all analyses and visualizations underlying **Figure 5**, focusing on the epithelial **immune-regulatory cancer (IRC)** transcriptional program, its spatial distribution across the epithelial manifold, and its relationship to **CD55** at the single-cell and tumor (hash.ID) level.
+
+```{r}
+
+## ============================================================
+## Setup: Load packages and tumor epithelial Seurat object
+## ============================================================
+## Description:
+## - Loads all packages required for module scoring, per-cell and per-tumor
+##   summaries, and publication-ready plotting.
+## - Reads the preprocessed epithelial Seurat object used throughout Figure 5.
+##
+## Inputs:
+## - "tumorcells.rds" : Seurat object with RNA assay, UMAP, and metadata
+##
+## Output:
+## - tumcells : Seurat object used for all panels in Figure 5
+## ============================================================
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr)
+  library(tibble)
+  library(ggplot2)
+  library(Nebulosa)
+  library(ggpubr)
+  library(scales)   # REQUIRED for rescale()
+})
+
+tumcells <- readRDS("tumorcells.rds")
+
+```
+
+## Figure 5a – Spatial distribution of the IRC program and CD55 expression
+
+**Description:**  
+This panel visualizes the spatial organization of the IRC transcriptional program and CD55 expression across the epithelial UMAP manifold.
+
+Two complementary density maps are shown:
+- A Nebulosa density map of the IRC module score (`MS_IRC_1`), highlighting regions enriched for the immune-regulatory cancer state.
+- A Nebulosa density map of CD55 expression, revealing co-localization with IRC-high epithelial regions.
+
+These maps establish the spatial concordance between the IRC program and complement‐regulatory gene expression at single-cell resolution.
+
+**Inputs:**
+- Seurat object: `tumcells`
+- IRC gene set → module score `MS_IRC_1`
+- CD55 expression (log-normalized RNA layer)
+
+**Outputs:**
+- UMAP density plot of `MS_IRC_1`
+- UMAP density plot of CD55 expression
+
+```{r}
+
+## ============================================================
+## Figure 5a: IRC module score + Nebulosa density plot
+##           + CD55 expression density plot (optionally boosted)
+## ============================================================
+## What you did:
+## 1) Defined an IRC epithelial gene set (vector of gene symbols).
+## 2) Computed an IRC module score with AddModuleScore (-> MS_IRC_1).
+## 3) Visualized the IRC program on the epithelial UMAP using Nebulosa density.
+## 4) Pulled Cd55 expression from the RNA layer ("data"), stored it in meta.data,
+##    optionally boosted it for visualization, and plotted density again.
+##
+## Inputs:
+## - tumcells: Seurat object with UMAP reduction and RNA assay
+##
+## Outputs:
+## - p_irc_density : Nebulosa density of MS_IRC_1
+## - p_cd55_density: Nebulosa density of boosted CD55 expression
+## ============================================================
+
+DefaultAssay(tumcells) <- "RNA"
+
+## --- 1) IRC gene vector --------------------------------------
+irc_genes <- c(
+  "Lypd8","Dmbt1","Lgals4","Phgr1","Plac8","Muc13","Ceacam1","Ceacam20",
+  "Dhrs9","Cdhr5","Ms4a8a","Lgals3","Cd38","Serpinb1a","Tspan1","Gpa33",
+  "Vil1","Krt8","Krt19","Clu","Cd55","Nt5e","Il1rn","Il18","Il34","Cfb",
+  "Cx3cl1","Gas6","Ifngr1","Ifngr2","Isg15","Isg20","Oas1a","Oas1g",
+  "Oasl1","Oasl2","Ddx60","Zbp1","Irf7","Batf2","Trim25","Parp9",
+  "Parp14","Slfn4","Gsdmd","Nlrc4","Casp1","Pycard","Ly6a","Tfcp2l1"
+)
+
+## --- 2) AddModuleScore (creates MS_IRC_1) ---------------------
+irc_genes_use <- intersect(irc_genes, rownames(tumcells))
+if (length(irc_genes_use) < 5) {
+  stop("Too few IRC genes found in tumcells. Check gene symbols / rownames(tumcells).")
+}
+
+## NOTE: This will append a column MS_IRC_1 to meta.data
+tumcells <- AddModuleScore(
+  object   = tumcells,
+  features = list(irc_genes_use),
+  name     = "MS_IRC_"
+)
+
+stopifnot("MS_IRC_1" %in% colnames(tumcells@meta.data))
+
+## --- 3) Nebulosa density plot (IRC score) ---------------------
+fiery_pal <- c("grey85", "#D9D9D9", "#E87373", "#D64545", "#8B0000")
+
+p_irc_density <- plot_density(
+  tumcells,
+  features = "MS_IRC_1",
+  reduction = "umap"
+) +
+  scale_color_gradientn(colours = fiery_pal) +
+  theme_classic() +
+  ggtitle("IRC signature (MS_IRC_1)")
+
+p_irc_density
+
+
+## --- 4) Pull Cd55 expression (Seurat v5 layer API) ------------
+## If your object is NOT Seurat v5 layers, replace layer="data" with slot="data".
+cd55_df <- FetchData(
+  object = tumcells,
+  vars   = "Cd55",
+  assay  = DefaultAssay(tumcells),
+  layer  = "data"
+)
+
+tumcells$Cd55_expr <- cd55_df$Cd55
+
+## --- 5) Optional boost for visualization ----------------------
+## Purpose: stretch mid-range values so gradients are easier to see in density plots
+boost_vec <- function(x, gamma = 0.5) {
+  x_pos <- pmax(x, 0)
+  x01   <- scales::rescale(x_pos, to = c(0, 1), na.rm = TRUE)
+  x01^gamma
+}
+
+gamma_val <- 0.4
+tumcells$Cd55_expr_boost <- boost_vec(tumcells$Cd55_expr, gamma = gamma_val)
+
+## --- 6) Nebulosa density plot (Cd55 boosted) -------------------
+p_cd55_density <- plot_density(
+  tumcells,
+  features  = "Cd55_expr_boost",
+  reduction = "umap"
+) +
+  scale_color_gradientn(colours = fiery_pal) +
+  theme_classic() +
+  ggtitle(paste0("Cd55 expression (boosted; gamma=", gamma_val, ")"))
+
+p_cd55_density
+
+```
+
+## Figure 5b – Cell-level correlation between IRC activity and CD55
+
+**Description:**  
+This panel quantifies the relationship between IRC program strength and CD55 expression at the single-cell level.
+
+Analyses include:
+- Scatter plot with linear and LOESS smoothing to visualize monotonic and nonlinear trends.
+
+This demonstrates that increasing IRC transcriptional activity is associated with elevated CD55 expression.
+
+**Inputs:**
+- `MS_IRC_1` module score
+- CD55 expression values
+
+**Outputs:**
+- IRC–CD55 plot
+
+```{r}
+
+## ============================================================
+## Figure 5b: Relationship between IRC program activity and Cd55
+## - Compute per-cell IRC module score vs Cd55 expression
+## - Restrict to Cd55+ cells to avoid zero-inflation
+## - Quantify association (Spearman) and visualize trend
+## ============================================================
+
+library(dplyr)
+library(ggplot2)
+
+# Ensure we are working on the RNA assay (so FetchData(layer="data") pulls log-normalized RNA)
+DefaultAssay(tumcells) <- "RNA"
+
+## ------------------------------------------------------------
+## 1) Fetch MS_IRC_1 and Cd55 (Seurat v5-safe)
+## ------------------------------------------------------------
+# FetchData returns a data.frame with one row per cell.
+# layer="data" uses the log-normalized expression matrix ("data" layer in Seurat v5).
+df_cor_pos <- FetchData(
+  tumcells,
+  vars   = c("MS_IRC_1", "Cd55"),
+  layer  = "data"
+) %>%
+  # Rename columns for clarity in plotting
+  dplyr::rename(
+    irc_score = MS_IRC_1,  # IRC signature module score (AddModuleScore output)
+    Cd55_expr = Cd55       # Cd55 log-normalized expression
+  ) %>%
+  # Keep only Cd55+ cells to reduce zero-inflation and focus on expressing compartment
+  filter(Cd55_expr > 0)
+
+## ------------------------------------------------------------
+## 2) Spearman correlation (Cd55+ cells only)
+## ------------------------------------------------------------
+# Spearman correlation is rank-based (robust to non-linearity and outliers),
+# appropriate for module scores vs gene expression in scRNA-seq.
+cor_test_pos <- cor.test(
+  df_cor_pos$irc_score,
+  df_cor_pos$Cd55_expr,
+  method = "spearman"
+)
+
+# Print correlation result (rho + p-value)
+cor_test_pos
+
+
+## ------------------------------------------------------------
+## 3) Smooth LOESS trend 
+## ------------------------------------------------------------
+# Alternative visualization emphasizing potentially non-linear trends:
+# LOESS is a local smoother; the CI band helps convey uncertainty.
+# NOTE: LOESS can be slow on very large datasets—downsample cells if needed.
+ggplot(df_cor_pos, aes(x = irc_score, y = Cd55_expr)) +
+  geom_smooth(
+    method    = "loess",
+    span      = 0.6,        # smoothing strength (lower = wigglier)
+    se        = TRUE,       # show confidence interval band
+    color     = "#8B0000",  # dark red line
+    fill      = "#F4A6A6",  # pastel red CI band
+    linewidth = 1.1
+  ) +
+  labs(
+    x = "IRC module score (MS_IRC_1)",
+    y = "Cd55 expression (log-normalized)"
+  ) +
+  theme_classic(base_size = 14) +
+  theme(
+    axis.line         = element_line(color = "black", linewidth = 0.4),
+    axis.ticks        = element_line(color = "black", linewidth = 0.3),
+    axis.ticks.length = grid::unit(2, "pt"),
+    axis.text         = element_text(color = "black"),
+    axis.title        = element_text(color = "black"),
+    panel.border      = element_rect(color = "black", fill = NA, linewidth = 0.4),
+    plot.margin       = margin(5.5, 5.5, 5.5, 5.5)
+  )
+
+```
+
+## Figure 5c – Tumor-level CD55 expression stratified by IRC state
+
+**Description:**  
+This panel aggregates epithelial cells per tumor (`hash.ID`) and compares mean CD55 expression between IRC-high and IRC-low tumors.
+
+Two stratifications are shown:
+- Binary IRC state defined from existing `irc_state` annotation.
+- Quantile-based stratification using top and bottom 20% of tumors ranked by mean `MS_IRC_1`.
+
+This establishes that IRC-high tumors exhibit systematically elevated CD55 expression at the tumor level.
+
+**Inputs:**
+- Tumor-level means of `MS_IRC_1`
+- Tumor-level means of CD55
+- IRC state (high vs low)
+
+**Outputs:**
+- Boxplots of mean CD55 per tumor (IRC-high vs IRC-low)
+
+
+```{r}
+## ============================================================
+## Figure 5c: Tumor-level Cd55 expression vs IRC activity states
+##
+## This chunk generates two related tumor-level summary plots:
+##
+## (1) Cd55 per tumor (hash.ID), stratified by an existing binary
+##     IRC state annotation stored in meta.data as `irc_state`
+##     (levels: "high" / "low").
+##
+## (2) Cd55 per tumor (hash.ID), stratified by IRC *signature*
+##     intensity computed from the epithelial IRC module score
+##     `MS_IRC_1` (top 20% tumors = "high", bottom 20% = "low").
+##
+## Biological interpretation:
+## These analyses test whether tumors with elevated IRC programs
+## (either pre-annotated or score-defined) show higher mean Cd55
+## expression at the tumor (sample) level.
+##
+## Required metadata / features in `tumcells`:
+## - meta.data$hash.ID      : tumor/sample identifier (one per mouse tumor)
+## - meta.data$irc_state    : categorical label with "high"/"low" (for plot 1)
+## - meta.data$MS_IRC_1     : IRC AddModuleScore output (for plot 2)
+## - gene "Cd55" available  : expression pulled by FetchData()
+## ============================================================
+
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(tibble)
+
+DefaultAssay(tumcells) <- "RNA"
+
+## --------------------------------
+## Part 1) Tumor-level mean Cd55 by pre-defined IRC state
+## --------------------------------
+
+## 1) Build a tumor-level table: mean Cd55 per hash.ID within each irc_state group
+##    (Note: group_by(hash.ID, irc_state) assumes each hash.ID belongs to exactly
+##    one irc_state; if not, you will duplicate tumors across states.)
+df_cd55 <- FetchData(
+  tumcells,
+  vars = c("Cd55", "hash.ID", "irc_state"),
+  layer = "data"   # Seurat v5-safe; uses log-normalized "data" layer
+) %>%
+  as_tibble() %>%
+  filter(
+    !is.na(hash.ID),
+    irc_state %in% c("high", "low")
+  ) %>%
+  mutate(
+    # enforce consistent ordering for plotting (high left, low right)
+    irc_state = factor(irc_state, levels = c("high", "low"))
+  ) %>%
+  group_by(hash.ID, irc_state) %>%
+  summarise(
+    Cd55_mean = mean(Cd55, na.rm = TRUE),
+    .groups   = "drop"
+  )
+
+## 2) Colors (NOTE: your comments were swapped; fixed here)
+irc_cols_box <- c(
+  high = "#2FA4A9",  # teal-ish
+  low  = "#C85C4A"   # pastel red
+)
+
+## 3) Boxplot: each dot = one tumor (hash.ID), y = mean Cd55 across cells in that tumor
+##    Wilcoxon compares tumor-level Cd55_mean between high vs low groups.
+p_cd55_box <- ggplot(
+  df_cd55,
+  aes(x = irc_state, y = Cd55_mean, fill = irc_state)
+) +
+  geom_boxplot(
+    width         = 0.8,
+    outlier.shape = NA,
+    linewidth     = 0.7,
+    colour        = "black"
+  ) +
+  geom_jitter(
+    width  = 0.10,
+    size   = 2.2,
+    alpha  = 0.9,
+    stroke = 0.2,
+    shape  = 21,
+    colour = "black"
+  ) +
+  scale_fill_manual(values = irc_cols_box) +
+  labs(
+    x = NULL,
+    y = "Mean Cd55 expression per tumor"
+  ) +
+  expand_limits(y = 0) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.x     = element_text(size = 11),
+    axis.text.y     = element_text(size = 11),
+    axis.title.y    = element_text(size = 12, face = "bold"),
+    legend.position = "none",
+    plot.margin     = margin(8, 8, 4, 8)
+  )
+
+p_cd55_box
+
+
+## ============================================================
+## Part 2) Tumor-level mean Cd55 by IRC-signature (MS_IRC_1 quantiles)
+## ============================================================
+
+## Sanity checks: required columns must exist
+stopifnot("hash.ID"  %in% colnames(tumcells@meta.data))
+stopifnot("MS_IRC_1" %in% colnames(tumcells@meta.data))
+
+## 0) Compute tumor-level mean IRC signature (MS_IRC_1) per hash.ID
+df_irc_tm <- FetchData(
+  tumcells,
+  vars  = c("MS_IRC_1", "hash.ID"),
+  layer = "data"
+) %>%
+  as_tibble() %>%
+  filter(!is.na(hash.ID)) %>%
+  group_by(hash.ID) %>%
+  summarise(
+    irc_signature_mean = mean(MS_IRC_1, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+## 1) Define IRC-signature high/low tumors using top/bottom 20% thresholds
+q20 <- as.numeric(quantile(df_irc_tm$irc_signature_mean, 0.20, na.rm = TRUE))
+q80 <- as.numeric(quantile(df_irc_tm$irc_signature_mean, 0.80, na.rm = TRUE))
+
+df_irc_tm <- df_irc_tm %>%
+  mutate(
+    irc_signature_state = case_when(
+      irc_signature_mean <= q20 ~ "low",
+      irc_signature_mean >= q80 ~ "high",
+      TRUE                      ~ NA_character_
+    ),
+    # enforce plotting order (high left, low right)
+    irc_signature_state = factor(irc_signature_state, levels = c("high", "low"))
+  ) %>%
+  filter(!is.na(irc_signature_state))
+
+# quick check: number of tumors per group
+table(df_irc_tm$irc_signature_state)
+
+## 2) Compute tumor-level mean Cd55 per hash.ID (across all cells in that tumor)
+df_cd55_tm <- FetchData(
+  tumcells,
+  vars  = c("Cd55", "hash.ID"),
+  layer = "data"
+) %>%
+  as_tibble() %>%
+  filter(!is.na(hash.ID)) %>%
+  group_by(hash.ID) %>%
+  summarise(
+    Cd55_mean = mean(Cd55, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+## 3) Join Cd55 with IRC-signature state (inner_join keeps only high/low tumors)
+df_cd55_sig <- df_cd55_tm %>%
+  inner_join(
+    df_irc_tm %>% select(hash.ID, irc_signature_state),
+    by = "hash.ID"
+  )
+
+## 4) Reuse the same high/low colors for consistency
+irc_cols_box <- c(
+  high = "#2FA4A9",  # teal-ish
+  low  = "#C85C4A"   # pastel red
+)
+
+## 5) Boxplot: tumor-level Cd55 in IRC-signature high vs low tumors
+p_cd55_box_sig <- ggplot(
+  df_cd55_sig,
+  aes(x = irc_signature_state, y = Cd55_mean, fill = irc_signature_state)
+) +
+  geom_boxplot(
+    width         = 0.8,
+    outlier.shape = NA,
+    linewidth     = 0.7,
+    colour        = "black"
+  ) +
+  geom_jitter(
+    width  = 0.10,
+    size   = 2.2,
+    alpha  = 0.9,
+    stroke = 0.2,
+    shape  = 21,
+    colour = "black"
+  ) +
+  scale_fill_manual(values = irc_cols_box) +
+  labs(
+    x = "IRC-signature",
+    y = "Mean Cd55 expression per tumor"
+  ) +
+  expand_limits(y = 0) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.text.x     = element_text(size = 11),
+    axis.text.y     = element_text(size = 11),
+    axis.title.x    = element_text(size = 12, face = "bold"),
+    axis.title.y    = element_text(size = 12, face = "bold"),
+    legend.position = "none",
+    plot.margin     = margin(8, 8, 4, 8)
+  )
+
+p_cd55_box_sig
+
+```
+## Figure 5d – Tumor-model–resolved expression of CD55 and IRC signature
+
+**Description:**  
+This panel resolves CD55 and IRC signature activity across genetically defined tumor models.
+
+For each tumor model:
+- Per-tumor mean CD55 expression is visualized as a boxplot.
+
+This analysis links oncogenic genotype to activation of the IRC–CD55 immune-evasion axis.
+
+**Inputs:**
+- `tumor_model` annotation
+- Tumor-level means of CD55
+
+**Outputs:**
+- Model-ordered boxplots of CD55 expression
+
+```{r}
+
+## ============================================================
+## Figure 5d: Tumor-model resolved expression of CD55 and IRC signature
+## ============================================================
+## 
+## - Computed per-tumor (hash.ID) mean Cd55 expression.
+## - Grouped tumors by tumor_model and visualized model distributions.
+## - Ordered tumor models by their mean/median to show genotype-dependent trends.
+##
+## REQUIRED meta.data columns:
+## - hash.ID
+## - tumor_model
+## - MS_IRC_1  (already created in Fig 5a)
+##
+## Outputs:
+## - Boxplot per tumor model: mean Cd55 per tumor
+## ============================================================
+
+DefaultAssay(tumcells) <- "RNA"
+stopifnot("tumor_model" %in% colnames(tumcells@meta.data))
+
+## --------------------------------
+## 0) Colors & legend order
+## --------------------------------
+pastel_mid_cols_darker_distinct <- c(
+  "#C85C4A", "#2FA4A9", "#C9B037", "#E07A3F", "#2F5E6E",
+  "#6DBE96", "#6755AF", "#CF5FB5", "#7A5C8F", "#4E6FA8",
+  "#3DB4E6", "#6A42C2", "#F2911B", "#2F9C7E", "#D55244",
+  "#4D7A9B", "#7BC870", "#1F8FB0", "#E0A233", "#D97706",
+  "#9C4F9E", "#3D608A", "#B95D8E", "#E66A2C", "#00BFA5",
+  "#3FA7B3", "#274C5B", "#BFA495", "#7FA8A6", "#D9876C",
+  "#7A4F2A", "#8A86A5", "#B56576", "#3F88C5", "#6FB1A0",
+  "#C48A1D", "#B4534F", "#5A8FC9", "#7CB342", "#A175B0"
+)
+
+legend_order <- c(
+  "Colon-WT",
+  "VA", "VAKP", "VAKPS",
+  "VBP", "VBPN", "VBPNA", "VBPNC",
+  "VKP", "VKPN",
+  "AKP-BFP", "AKPS-BFP", "AKP",
+  "AKP-Arid1a", "AKP-Atm", "AKP-Atrx",
+  "AKP-Fbxw7", "AKP-Smad4",
+  "AKP-Pten", "AKP-Ptprt"
+)
+
+tumor_cols <- setNames(pastel_mid_cols_darker_distinct[seq_along(legend_order)], legend_order)
+
+## --------------------------------
+## 1) Per-tumor mean CD55
+## --------------------------------
+df_cd55_tm <- FetchData(tumcells, vars = c("Cd55", "hash.ID", "tumor_model"), layer = "data") %>%
+  as_tibble() %>%
+  filter(!is.na(hash.ID), !is.na(tumor_model), tumor_model %in% legend_order) %>%
+  mutate(tumor_model = factor(tumor_model, levels = legend_order)) %>%
+  group_by(hash.ID, tumor_model) %>%
+  summarise(Cd55_mean = mean(Cd55, na.rm = TRUE), .groups = "drop")
+
+model_order_by_Cd55 <- df_cd55_tm %>%
+  group_by(tumor_model) %>%
+  summarise(Cd55_model_mean = mean(Cd55_mean, na.rm = TRUE), .groups = "drop") %>%
+  arrange(Cd55_model_mean) %>%
+  pull(tumor_model)
+
+df_cd55_tm <- df_cd55_tm %>%
+  mutate(tumor_model_plot = factor(tumor_model, levels = model_order_by_Cd55))
+
+p_cd55_tumor_model <- ggplot(df_cd55_tm, aes(x = tumor_model_plot, y = Cd55_mean, fill = tumor_model)) +
+  geom_boxplot(width = 0.7, outlier.shape = NA, linewidth = 0.4, colour = "black") +
+  geom_jitter(width = 0.15, size = 1.8, alpha = 0.9, stroke = 0.1, shape = 21, colour = "black") +
+  scale_fill_manual(values = tumor_cols) +
+  labs(x = NULL, y = "Mean Cd55 expression per tumor") +
+  expand_limits(y = 0) +
+  theme_classic(base_size = 12) +
+  theme(axis.text.x = element_text(size = 9, angle = 45, hjust = 1),
+        legend.position = "none")
+
+p_cd55_tumor_model
+
+```
+
+## Summary
+
+This notebook assembles all analyses underlying Figure 5 and dissects the epithelial immune-regulatory cancer (IRC) program and its association with CD55 expression in colorectal cancer models. Using a curated IRC gene signature, module scores are computed and visualized across the epithelial UMAP to reveal spatial gradients of IRC activity. Correlation analyses at single-cell resolution demonstrate a tight positive relationship between IRC program strength and CD55 expression. Tumor-level aggregation further shows that IRC-high tumors display significantly elevated CD55 expression compared to IRC-low tumors, both when stratified by predefined IRC state and when defined by extreme quantiles of the IRC signature. Finally, genotype-resolved boxplots highlight how IRC activity and CD55 expression vary across tumor models, linking oncogenic context to immune-evasive epithelial states. Together, these analyses establish CD55 as a robust molecular correlate of the IRC program and support its role as a key effector of epithelial immune evasion.
+
