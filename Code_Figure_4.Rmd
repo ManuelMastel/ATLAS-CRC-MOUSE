@@ -1,0 +1,708 @@
+---
+title: "Figure 4 - ATLAS - IRC-state–dependent myeloid remodeling"
+author: Manuel Mastel
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  results = "hide",   # hide printed text, keep plots
+  fig.align = "center",
+  fig.width = 12,
+  fig.height = 7
+)
+
+```
+
+This notebook assembles all analyses and visualizations underlying Figure 4, providing a single-cell dissection of the immune-regulatory cancer (IRC) epithelial program and its association with macrophage and neutrophil reprogramming across colorectal cancer models.
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr)
+  library(ggplot2)
+  library(SCpubr)
+  library(Nebulosa)
+})
+
+tumcells <- readRDS("tumorcells.rds")
+```
+
+## Figure 4a – Localization of the IRC epithelial compartment
+
+**Description:**  
+UMAP embeddings of tumor epithelial cells are used to visualize the spatial localization of the IRC population (cluster 4) relative to all other epithelial states. A one-versus-all highlighting strategy is applied to emphasize the IRC cluster while preserving the global manifold structure.
+
+**Analyses and visualizations:**
+- UMAP of all epithelial cells.
+- Overlay of cluster 4 (IRC) cells using filled points.
+- One-vs-all contrast to illustrate spatial segregation and density.
+
+```{r}
+## Build UMAP data frame with cluster 4 vs all annotation
+umap_df <- as.data.frame(Embeddings(tumcells, "umap"))
+colnames(umap_df)[1:2] <- c("UMAP_1", "UMAP_2")
+
+# add cluster identity
+umap_df$seurat_cluster <- as.character(tumcells$seurat_clusters)
+
+# define one-vs-all indicator for cluster 4 (IRC)
+umap_df$cl4_vs_all <- ifelse(umap_df$seurat_cluster == "4", "cl4", "other")
+
+# factor with controlled order
+umap_df$cl4_vs_all <- factor(umap_df$cl4_vs_all, levels = c("other", "cl4"))
+
+p_cl4_pop <- ggplot() +
+  geom_point(
+    data = subset(umap_df, cl4_vs_all == "other"),
+    aes(UMAP_1, UMAP_2, color = cl4_vs_all),
+    size  = 1.2,
+    alpha = 0.8
+  ) +
+  geom_point(
+    data = subset(umap_df, cl4_vs_all == "cl4"),
+    aes(UMAP_1, UMAP_2, fill = cl4_vs_all),
+    color  = "black",
+    size   = 2.7,
+    shape  = 21,
+    stroke = 0.07,
+    alpha  = 1
+  ) +
+  scale_color_manual(values = c("other" = "grey70", "cl4" = "#8BCF9B"), name = NULL) +
+  scale_fill_manual(values  = c("other" = "grey70", "cl4" = "#8BCF9B"), name = NULL) +
+  theme_void() +
+  ggtitle("IRC cells (cluster 4)") +
+  theme(
+    plot.title        = element_text(hjust = 0.5, face = "bold"),
+    legend.position   = "bottom",
+    legend.text       = element_text(size = 11),
+    legend.margin     = margin(t = 6),
+    legend.box.margin = margin(t = -5)
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 5)),
+    fill  = guide_legend(override.aes = list(size = 5))
+  )
+
+p_cl4_pop
+```
+
+## Figure 4c – Tumor-level enrichment of IRC cells
+
+**Description:**  
+The abundance of IRC cells is quantified at the tumor level to assess genotype-dependent enrichment and inter-tumoral heterogeneity.
+
+**Analyses and visualizations:**
+- Calculation of the fraction of cluster-4 cells per multiplexed tumor (`hash.ID`).
+- Fisher’s exact tests to evaluate over-representation of IRC cells in individual tumors.
+- Boxplots of IRC fractions grouped by tumor model, ordered by median IRC abundance.
+
+```{r}
+pastel_mid_cols_darker1 <- c(
+  "#D1785F", "#56A897", "#D5BC71", "#DDA06C", "#4D6C78",
+  "#8FB18C", "#7A71AA", "#C47DB3", "#827596", "#6D82AE",
+  "#73C1DF", "#7A5AB3", "#E9832A", "#66A890", "#DC6C64",
+  "#6A8299", "#92BC87", "#518EAA", "#D99C5F", "#476170",
+  "#A26A9A", "#5C6B90", "#BA7F9F", "#DD8754", "#4FC3A8",
+  "#5296AA", "#C4ABA8", "#9EADA7", "#DA948D",
+  "#8A6B4D", "#A29BA9", "#B98596", "#73A0E6"
+)
+
+library(dplyr)
+library(ggplot2)
+
+md <- tumcells@meta.data
+md$seurat_clusters <- as.character(md$seurat_clusters)
+
+## ------------------------------------------------------------
+## 1) Fraction of cluster 4 per tumor (hash.ID)
+## ------------------------------------------------------------
+cl4_by_hash <- md %>%
+  group_by(hash.ID) %>%
+  summarise(
+    n_total  = n(),
+    n_cl4    = sum(seurat_clusters == "4"),
+    frac_cl4 = n_cl4 / n_total,
+    .groups  = "drop"
+  ) %>%
+  arrange(desc(frac_cl4))
+
+
+## ------------------------------------------------------------
+## 2) Optional: Fisher enrichment test per tumor (greater)
+## ------------------------------------------------------------
+hash_ids <- unique(md$hash.ID)
+
+enrich_list <- lapply(hash_ids, function(hid) {
+  in_tumor <- md$hash.ID == hid
+  is_cl4   <- md$seurat_clusters == "4"
+
+  a <- sum(in_tumor & is_cl4)
+  b <- sum(in_tumor & !is_cl4)
+  c <- sum(!in_tumor & is_cl4)
+  d <- sum(!in_tumor & !is_cl4)
+
+  tab <- matrix(c(a, b, c, d), nrow = 2,
+                dimnames = list(
+                  Tumor    = c("this", "other"),
+                  Clusters = c("cl4", "other")
+                ))
+
+  ft <- fisher.test(tab, alternative = "greater")
+
+  data.frame(
+    hash.ID    = hid,
+    n_cl4      = a,
+    n_total    = a + b,
+    frac_cl4   = ifelse(a + b > 0, a / (a + b), NA_real_),
+    p_value    = ft$p.value,
+    odds_ratio = unname(ft$estimate)
+  )
+})
+
+enrich_df <- bind_rows(enrich_list) %>%
+  arrange(p_value)
+
+
+## ------------------------------------------------------------
+## 3) Model-level boxplot: % cluster 4 per tumor (hash.ID)
+## ------------------------------------------------------------
+df_cl4 <- md %>%
+  group_by(hash.ID, tumor_model) %>%
+  summarise(
+    n_total  = n(),
+    n_cl4    = sum(seurat_clusters == "4"),
+    frac_cl4 = n_cl4 / n_total,
+    .groups  = "drop"
+  )
+
+# Order tumor models by median % cluster 4
+order_models <- df_cl4 %>%
+  group_by(tumor_model) %>%
+  summarise(med_frac = median(frac_cl4, na.rm = TRUE), .groups = "drop") %>%
+  arrange(med_frac) %>%
+  pull(tumor_model)
+
+df_cl4 <- df_cl4 %>%
+  mutate(
+    tumor_model = factor(tumor_model, levels = order_models),
+    perc_cl4    = frac_cl4 * 100
+  )
+
+p_cl4_box <- ggplot(df_cl4, aes(x = tumor_model, y = perc_cl4, fill = tumor_model)) +
+  geom_boxplot(
+    width         = 0.6,
+    outlier.size  = 0.7,
+    outlier.stroke = 0.2,
+    linewidth     = 0.4
+  ) +
+  stat_summary(
+    fun = median,
+    geom = "point",
+    size = 1.4,
+    color = "black",
+    shape = 21,
+    fill  = "white",
+    stroke = 0.3
+  ) +
+  scale_fill_manual(values = pastel_mid_cols_darker1[seq_along(levels(df_cl4$tumor_model))]) +
+  labs(
+    x = NULL,
+    y = "% IRC cells (cluster 4) per tumor (hash.ID)"
+  ) +
+  theme_classic(base_size = 11) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 8),
+    axis.text.y = element_text(size = 9),
+    axis.title.y = element_text(size = 10),
+    panel.border = element_rect(color = "black", fill = NA, linewidth = 0.4),
+    axis.line = element_blank(),
+    axis.ticks.length = unit(2, "pt"),
+    axis.ticks = element_line(linewidth = 0.3)
+  )
+
+p_cl4_box
+```
+
+## Figure 4d – Macrophage ecosystem remodeling in IRC-high versus IRC-low tumors
+
+**Description:**  
+Macrophage and dendritic cell populations are analyzed to determine how the IRC epithelial program associates with large-scale reorganization of the myeloid compartment.
+
+**Analyses and visualizations:**
+- UMAP of myeloid cells colored by IRC state (high vs low).
+- Stacked barplots showing relative proportions of myeloid subtypes (`myeloid_annotation`) in IRC-high and IRC-low tumors.
+- Comparison of inflammatory, complement-associated, resident, and dendritic cell states.
+
+```{r}
+macs <- readRDS("myeloid.rds")
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr)
+  library(ggplot2)
+  library(scales)
+})
+
+## 1) Keep only IRC high/low
+macs_hl <- subset(macs, subset = irc_state %in% c("low", "high"))
+
+## 2) Set factor order
+macs_hl$irc_state <- factor(macs_hl$irc_state, levels = c("low", "high"))
+
+## 3) Pastel-dark colors
+irc_cols <- c(
+  "low"  = "#C14444",
+  "high" = "#3B5B8A"
+)
+
+## 4) UMAP colored by IRC state
+DimPlot(
+  macs_hl,
+  group.by  = "irc_state",
+  reduction = "umap",
+  pt.size   = 0.7,
+  cols      = irc_cols,
+  order     = c("high", "low")
+)
+
+## ------------------------------------------------------------
+## Stacked barplot: myeloid composition (IRC High vs Low)
+## ------------------------------------------------------------
+df_macs <- macs@meta.data %>%
+  dplyr::select(irc_state, myeloid_annotation) %>%
+  dplyr::filter(irc_state %in% c("low", "high")) %>%
+  dplyr::mutate(
+    irc_state = factor(irc_state, levels = c("high", "low")),
+    myeloid_annotation = factor(
+      myeloid_annotation,
+      levels = c(
+        "Migratory dendritic cells",
+        "C1q+ complement macrophages",
+        "Granulocytic myeloid",
+        "Inflammatory monocytes/macrophages",
+        "Resident macrophages",
+        "cDC1",
+        "Spp1+ TAMs",
+        "cDC2 / monocyte-derived DC",
+        "Interferon-stimulated myeloid cells"
+      )
+    )
+  )
+
+df_macs_prop <- df_macs %>%
+  dplyr::count(irc_state, myeloid_annotation) %>%
+  group_by(irc_state) %>%
+  mutate(freq = n / sum(n)) %>%
+  ungroup()
+
+macs_cols <- c(
+  "Migratory dendritic cells"             = "#C9745B",
+  "C1q+ complement macrophages"           = "#4BA59B",
+  "Granulocytic myeloid"                  = "#D7BD63",
+  "Inflammatory monocytes/macrophages"    = "#D79A5A",
+  "Resident macrophages"                  = "#4C6E7F",
+  "cDC1"                                  = "#97BC73",
+  "Spp1+ TAMs"                            = "#6D64A9",
+  "cDC2 / monocyte-derived DC"            = "#C488C6",
+  "Interferon-stimulated myeloid cells"   = "#4D63A8"
+)
+
+p_macs_bar <- ggplot(df_macs_prop, aes(x = irc_state, y = freq, fill = myeloid_annotation)) +
+  geom_bar(stat = "identity", width = 0.8, colour = "black") +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_fill_manual(values = macs_cols) +
+  labs(
+    x = "IRC signature state",
+    y = "Fraction of myeloid cells",
+    fill = "Myeloid cell type",
+    title = "Myeloid composition (IRC High vs Low)"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title   = element_text(hjust = 0.5, size = 14),
+    axis.text.x  = element_text(size = 12),
+    axis.title   = element_text(size = 13),
+    legend.title = element_text(size = 12),
+    legend.text  = element_text(size = 11)
+  )
+
+p_macs_bar
+```
+
+## Figure 4e – Reactive inflammatory TAM programs in IRC-high tumors
+
+**Description:**  
+An extended inflammatory TAM (Inflam-TAM) gene signature is scored to assess spatial gradients and quantitative differences in macrophage activation states.
+
+**Analyses and visualizations:**
+- Module scoring of an extended Inflam-TAM gene set.
+- Nebulosa density maps displaying continuous Inflam-TAM activity across the myeloid UMAP.
+- Split violin and half-boxplots comparing Inflam-TAM scores between IRC-high and IRC-low tumors.
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr)
+  library(ggplot2)
+  library(Nebulosa)
+  library(gghalves)
+})
+
+DefaultAssay(macs) <- "RNA"
+
+## ------------------------------------------------------------
+## 1) Extended Inflam-TAM gene set (mouse)
+## ------------------------------------------------------------
+inflam_tam_ext_genes <- c(
+  "Cxcl1","Cxcl2","Cxcl3","Cxcl5","Ccl20","Ccl3",
+  "Il1b","Il1rn","G0s2","Inhba","Spp1",
+  "Fn1","Nrp1","Pycard","Saa3","Trem2"
+)
+
+# optional: missing genes
+inflam_tam_ext_genes[!inflam_tam_ext_genes %in% rownames(macs)]
+
+## ------------------------------------------------------------
+## 2) Module score calculation
+## ------------------------------------------------------------
+macs <- AddModuleScore(
+  object   = macs,
+  features = list(inflam_tam_ext_genes),
+  name     = "Inflam_TAM_ext"
+)
+
+macs$Inflam_TAM_ext_score <- macs$Inflam_TAM_ext1
+
+## ------------------------------------------------------------
+## 3) Nebulosa density plot (fiery palette)
+## ------------------------------------------------------------
+fiery_pal <- c(
+  "grey85",
+  "#D9D9D9",
+  "#E87373",
+  "#D64545",
+  "darkred",
+  "#8B0000"
+)
+
+p_inflam_neb <- plot_density(
+  macs,
+  features  = "Inflam_TAM_ext_score",
+  reduction = "umap"
+) +
+  scale_color_gradientn(colours = fiery_pal) +
+  ggtitle("Extended Inflam-TAM score (density)") +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5, size = 14))
+
+p_inflam_neb
+
+## ------------------------------------------------------------
+## 4) Split violin + split boxplot (IRC High vs Low)
+## ------------------------------------------------------------
+df_infl_macs <- macs@meta.data %>%
+  as.data.frame() %>%
+  dplyr::filter(irc_state %in% c("high","low")) %>%
+  dplyr::mutate(
+    irc_state   = factor(irc_state, levels = c("high","low")),
+    group_label = "Myeloid cells"
+  )
+
+fill_cols <- c("high" = "#6B8FD6", "low" = "#D97B76")
+
+p_macro_split_box <- ggplot(
+  df_infl_macs,
+  aes(x = group_label, y = Inflam_TAM_ext_score, fill = irc_state)
+) +
+  geom_half_violin(
+    data  = subset(df_infl_macs, irc_state == "high"),
+    side  = "l",
+    width = 0.9,
+    trim  = FALSE,
+    color = "grey20"
+  ) +
+  geom_half_violin(
+    data  = subset(df_infl_macs, irc_state == "low"),
+    side  = "r",
+    width = 0.9,
+    trim  = FALSE,
+    color = "grey20"
+  ) +
+  geom_half_boxplot(
+    data          = subset(df_infl_macs, irc_state == "high"),
+    side          = "l",
+    width         = 0.3,
+    outlier.shape = NA,
+    color         = "black"
+  ) +
+  geom_half_boxplot(
+    data          = subset(df_infl_macs, irc_state == "low"),
+    side          = "r",
+    width         = 0.3,
+    outlier.shape = NA,
+    color         = "black"
+  ) +
+  scale_fill_manual(values = fill_cols) +
+  labs(x = NULL, y = "Inflam TAM score") +
+  theme_classic(base_size = 16) +
+  theme(
+    axis.text.x     = element_text(face = "bold", size = 18),
+    axis.title.y    = element_text(face = "bold"),
+    legend.position = "none"
+  )
+
+p_macro_split_box
+```
+
+## Figure 4g – Neutrophil state composition in IRC-high versus IRC-low tumors
+
+**Description:**  
+Neutrophil populations are examined to determine whether the IRC program is associated with shifts toward inflammatory, suppressive, or immature neutrophil states.
+
+**Analyses and visualizations:**
+- UMAP of neutrophils colored by IRC state.
+- Stacked barplots of neutrophil subtypes (`neutro_annotation`) comparing IRC-high and IRC-low tumors.
+- Quantification of gMDSC-like, inflammatory, hypoxic, and suppressive TAN programs.
+
+```{r}
+neutro <- readRDS("neutro.rds")
+
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr)
+  library(ggplot2)
+  library(scales)
+})
+
+## 1) Keep only IRC high/low
+neutro_hl <- subset(neutro, subset = irc_state %in% c("low", "high"))
+
+## 2) Set factor order
+neutro_hl$irc_state <- factor(neutro_hl$irc_state, levels = c("low", "high"))
+
+## 3) Pastel-dark colors
+irc_cols <- c(
+  "low"  = "#C14444",
+  "high" = "#3B5B8A"
+)
+
+## 4) UMAP colored by IRC state
+DimPlot(
+  neutro_hl,
+  group.by  = "irc_state",
+  reduction = "umap",
+  pt.size   = 0.9,
+  cols      = irc_cols,
+  order     = c("high", "low")
+)
+
+## ------------------------------------------------------------
+## Stacked barplot: neutrophil composition (IRC High vs Low)
+## ------------------------------------------------------------
+df_neutro <- neutro@meta.data %>%
+  dplyr::select(irc_state, neutro_annotation) %>%
+  dplyr::filter(irc_state %in% c("low", "high")) %>%
+  dplyr::mutate(
+    irc_state = factor(irc_state, levels = c("high", "low")),
+    neutro_annotation = factor(
+      neutro_annotation,
+      levels = c(
+        "IFN-stimulated neutrophils",
+        "Immature TANs / gMDSC-like neutrophils",
+        "Inflammatory TANs",
+        "Mature effector neutrophils",
+        "Migratory/remodeling neutrophils",
+        "Nos2+ hypoxic/glycolytic TANs",
+        "PD-L2+ suppressive TANs",
+        "Pre-neutrophils (ProNeu state)",
+        "Saa3+ stress-activated TANs",
+        "SiglecF+ tumour-associated neutrophils"
+      )
+    )
+  )
+
+df_neutro_prop <- df_neutro %>%
+  dplyr::count(irc_state, neutro_annotation) %>%
+  group_by(irc_state) %>%
+  mutate(freq = n / sum(n)) %>%
+  ungroup()
+
+neutro_cols <- c(
+  "IFN-stimulated neutrophils"              = "#C9745B",
+  "Immature TANs / gMDSC-like neutrophils"  = "#4BA59B",
+  "Inflammatory TANs"                       = "#D7BD63",
+  "Mature effector neutrophils"             = "#D79A5A",
+  "Migratory/remodeling neutrophils"        = "#4C6E7F",
+  "Nos2+ hypoxic/glycolytic TANs"           = "#97BC73",
+  "PD-L2+ suppressive TANs"                 = "#6D64A9",
+  "Pre-neutrophils (ProNeu state)"          = "#C488C6",
+  "Saa3+ stress-activated TANs"             = "#6F5A8D",
+  "SiglecF+ tumour-associated neutrophils"  = "#4D63A8"
+)
+
+p_neutro_bar <- ggplot(df_neutro_prop, aes(x = irc_state, y = freq, fill = neutro_annotation)) +
+  geom_bar(stat = "identity", width = 0.8, colour = "black") +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_fill_manual(values = neutro_cols) +
+  labs(
+    x = "IRC signature state",
+    y = "Fraction of neutrophils",
+    fill = "Neutrophil state",
+    title = "Neutrophil composition (IRC High vs Low)"
+  ) +
+  theme_classic() +
+  theme(
+    plot.title   = element_text(hjust = 0.5, size = 14),
+    axis.text.x  = element_text(size = 12),
+    axis.title   = element_text(size = 13),
+    legend.title = element_text(size = 12),
+    legend.text  = element_text(size = 11)
+  )
+
+p_neutro_bar
+```
+
+## Figure 4h – MDSC-like neutrophil program linked to IRC state
+
+**Description:**  
+A curated MDSC-like neutrophil gene signature is used to map immunosuppressive neutrophil programs and to quantify their association with IRC-high tumors.
+
+**Analyses and visualizations:**
+- Module scoring of an MDSC-like neutrophil gene set.
+- Nebulosa density plot of continuous MDSC activity across the neutrophil UMAP.
+- Split violin and half-boxplots comparing MDSC module scores between IRC-high and IRC-low tumors.
+
+```{r}
+suppressPackageStartupMessages({
+  library(Seurat)
+  library(dplyr)
+  library(ggplot2)
+  library(Nebulosa)
+  library(gghalves)
+})
+
+DefaultAssay(neutro) <- "RNA"
+
+## ------------------------------------------------------------
+## 1) MDSC-like neutrophil gene set (mouse)
+## ------------------------------------------------------------
+mdsc_neutro_genes <- c(
+  "Cd14","Cd33","Lcn2","Wfdc21","Retnlg","Il4ra","Ly6g",
+  "Cxcl2","Chil3","Nos2","Saa3","Tirap"
+)
+
+missing_mdsc <- mdsc_neutro_genes[!mdsc_neutro_genes %in% rownames(neutro)]
+if (length(missing_mdsc) > 0) message("Missing genes: ", paste(missing_mdsc, collapse = ", "))
+
+## ------------------------------------------------------------
+## 2) Module score calculation
+## ------------------------------------------------------------
+neutro <- AddModuleScore(
+  object   = neutro,
+  features = list(mdsc_neutro_genes),
+  name     = "MDSC_neutro"
+)
+
+neutro$MDSC_neutro_score <- neutro$MDSC_neutro1
+
+## ------------------------------------------------------------
+## 3) Nebulosa density plot (fiery palette)
+## ------------------------------------------------------------
+fiery_pal <- c(
+  "grey85",
+  "#D9D9D9",
+  "#E87373",
+  "#D64545",
+  "darkred",
+  "#8B0000"
+)
+
+p_mdsc_neutro_neb <- plot_density(
+  neutro,
+  features  = "MDSC_neutro_score",
+  reduction = "umap"
+) +
+  scale_color_gradientn(colours = fiery_pal) +
+  ggtitle("MDSC-like score (Nebulosa density)") +
+  theme_classic()
+
+p_mdsc_neutro_neb
+
+## ------------------------------------------------------------
+## 4) Split violin + split boxplot (IRC High vs Low)
+## ------------------------------------------------------------
+df_mdsc_neutro <- neutro@meta.data %>%
+  as.data.frame() %>%
+  dplyr::filter(irc_state %in% c("high", "low")) %>%
+  dplyr::mutate(
+    irc_state   = factor(irc_state, levels = c("high", "low")),
+    group_label = "Neutrophils"
+  )
+
+fill_cols <- c("high" = "#6B8FD6", "low" = "#D97B76")
+
+p_mdsc_split_box <- ggplot(df_mdsc_neutro, aes(x = group_label, y = MDSC_neutro_score)) +
+  geom_half_violin(
+    data  = subset(df_mdsc_neutro, irc_state == "high"),
+    aes(fill = irc_state),
+    side  = "l",
+    width = 0.9,
+    trim  = FALSE,
+    color = "grey20"
+  ) +
+  geom_half_violin(
+    data  = subset(df_mdsc_neutro, irc_state == "low"),
+    aes(fill = irc_state),
+    side  = "r",
+    width = 0.9,
+    trim  = FALSE,
+    color = "grey20"
+  ) +
+  geom_half_boxplot(
+    data  = subset(df_mdsc_neutro, irc_state == "high"),
+    aes(fill = irc_state),
+    side          = "l",
+    width         = 0.3,
+    outlier.shape = NA,
+    color         = "black"
+  ) +
+  geom_half_boxplot(
+    data  = subset(df_mdsc_neutro, irc_state == "low"),
+    aes(fill = irc_state),
+    side          = "r",
+    width         = 0.3,
+    outlier.shape = NA,
+    color         = "black"
+  ) +
+  scale_fill_manual(values = fill_cols) +
+  labs(x = NULL, y = "MDSC-like neutrophil score") +
+  theme_classic(base_size = 16) +
+  theme(
+    axis.text.x      = element_blank(),
+    axis.ticks.x     = element_blank(),
+    axis.title.y     = element_text(face = "bold"),
+    legend.position  = "none",
+    plot.margin      = margin(10, 10, 10, 10)
+  )
+
+p_mdsc_split_box
+```
+
+
+Together, these panels establish a coordinated epithelial–myeloid axis in which the IRC cancer cell program is tightly coupled to inflammatory macrophage activation, MDSC-like neutrophil polarization, and global remodeling of the tumor immune microenvironment.
+
