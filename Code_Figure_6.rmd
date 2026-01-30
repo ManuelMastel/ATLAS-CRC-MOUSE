@@ -1,0 +1,966 @@
+---
+title: "Figure 6 - CITE-seq analzsis VBPNA - CD55 KO"
+author: Manuel Mastel
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  results = "hide",   # hide printed text, keep plots
+  fig.align = "center",
+  fig.width = 12,
+  fig.height = 7
+)
+
+```
+
+
+## Figures 6F and 6G — UMAP of CITE-seq data colored by broad cell types and split by genotype
+
+This section reproduces the UMAP visualizations of the VBPNA CITE-seq dataset used in Figures 6F and 6G. Cells are colored by manually curated broad cell-type annotations (epithelium/cancer cells, macrophages, neutrophils, T cells, fibroblasts, endothelial cells).In Figure 6F, all cells are shown together, whereas in Figure 6G the UMAP is split by genotype to compare NT and Cd55-knockout tumors using identical embeddings and color scales.
+
+
+```{r}
+
+# ============================================================
+# CITE-seq VBPNA (NT vs Cd55-KO) — Figures 6F & 6G
+# ============================================================
+
+# ============================================================
+# Setup: load required packages
+# ============================================================
+
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+
+options(width = 120)
+
+# ============================================================
+# Load Seurat object
+# ============================================================
+
+# Download CITE-seq Seurat object from Figshare and adjust path accordingly
+cite <- readRDS("cite_VBPNA_CD55_KO.rds")
+
+# Basic sanity checks
+stopifnot(inherits(cite, "Seurat"))
+stopifnot("umap" %in% names(cite@reductions))
+stopifnot(all(c("celltype_broad", "genotype") %in% colnames(cite@meta.data)))
+stopifnot("RNA" %in% Assays(cite))
+
+# ============================================================
+# Set default assay
+# ============================================================
+
+DefaultAssay(cite) <- "RNA"
+
+# ============================================================
+# Define color palette for broad cell types
+# ============================================================
+
+cols_broad <- c(
+  "Endothelial cells" = "#2F556B",
+  "Fibroblasts"       = "#AEB6B7",
+  "Macrophages"      = "#6FA06E",
+  "Neutrophils"      = "#C9B05A",
+  "T cells"          = "#D9B8B8",
+  "Tumor"            = "#D18A7A"   # can be renamed to "Cancer cells" if desired
+)
+
+# Check for unmapped levels
+missing_cols <- setdiff(unique(as.character(cite$celltype_broad)), names(cols_broad))
+if (length(missing_cols) > 0) {
+  message("WARNING: These celltype_broad levels have no color mapping: ",
+          paste(missing_cols, collapse = ", "))
+}
+
+# ============================================================
+# Figure 6F — UMAP colored by broad cell types
+# ============================================================
+
+p_6F <- DimPlot(
+  cite,
+  reduction = "umap",
+  group.by  = "celltype_broad",
+  cols      = cols_broad,
+  pt.size   = 1
+) +
+  ggtitle("CITE-seq") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+p_6F
+
+# ============================================================
+# Figure 6G — UMAP split by genotype (NT vs CD55_KO)
+# ============================================================
+
+# Ensure genotype is character
+cite$genotype <- as.character(cite$genotype)
+
+# Subset by genotype
+cite_NT      <- subset(cite, subset = genotype == "NT")
+cite_CD55_KO <- subset(cite, subset = genotype == "CD55_KO")
+
+# Plot NT
+p_NT <- DimPlot(
+  cite_NT,
+  reduction = "umap",
+  group.by  = "celltype_broad",
+  cols      = cols_broad,
+  pt.size   = 1
+) +
+  ggtitle("VBPNA - NT") +
+  NoLegend() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# Plot CD55 KO
+p_KO <- DimPlot(
+  cite_CD55_KO,
+  reduction = "umap",
+  group.by  = "celltype_broad",
+  cols      = cols_broad,
+  pt.size   = 1
+) +
+  ggtitle("VBPNA - Cd55 KO") +
+  NoLegend() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+# Combine side-by-side (Figure 6G)
+p_6G <- p_NT + p_KO + plot_layout(ncol = 2)
+p_6G
+
+# ============================================================
+# Optional: export figures
+# ============================================================
+
+# dir.create("results", showWarnings = FALSE)
+# ggsave("results/Fig6F_UMAP_celltypes.png", p_6F, width = 7, height = 5.5, dpi = 400)
+# ggsave("results/Fig6G_UMAP_by_genotype.png", p_6G, width = 10, height = 5.5, dpi = 400)
+
+# ============================================================
+# Session info for reproducibility
+# ============================================================
+
+sessionInfo()
+
+
+```
+
+
+## Figure 6H — Cell-type proportion boxplots (NT vs Cd55-KO)
+
+This section quantifies, for each biological replicate, the fraction of broad cell types (Cancer cells, Macrophages, Neutrophils, T cells, Fibroblasts, Endothelial cells) in VBPNA-NT and VBPNA-Cd55 KO tumors. Proportions are computed per replicate and compared between genotypes using a Wilcoxon rank-sum test (non-parametric, small n), with optional t-test results reported separately.
+
+
+```{r}
+
+## ============================================================
+## Cell-type proportion boxplots (per replicate) + statistics
+## Facet order: Cancer cells → Macrophages → Neutrophils
+##              → T cells → Fibroblasts → Endothelial cells
+## ============================================================
+
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(ggpubr)
+library(rstatix)
+
+## ------------------------------------------------------------
+## 0) Build replicate-level proportions from Seurat metadata
+## ------------------------------------------------------------
+
+md <- cite@meta.data
+stopifnot(all(c("replicate", "celltype_broad", "genotype") %in% colnames(md)))
+
+replicate_id <- as.character(md$replicate)
+celltype     <- as.character(md$celltype_broad)
+genotype     <- as.character(md$genotype)
+
+# Harmonize genotype labels
+genotype_group <- ifelse(genotype == "CD55_KO", "CD55-KO", genotype)
+genotype_group <- factor(genotype_group, levels = c("NT", "CD55-KO"))
+
+# Counts (replicate × cell type) and proportions
+tab      <- table(replicate_id, celltype)
+prop_mat <- prop.table(tab, margin = 1)
+
+celltype_props_sub <- as.data.frame(prop_mat, stringsAsFactors = FALSE)
+colnames(celltype_props_sub) <- c("sample_id", "celltype_broad", "prop")
+
+# Map genotype to each replicate
+rep2geno <- tapply(as.character(genotype_group), replicate_id, function(x) unique(x)[1])
+celltype_props_sub$genotype_group <- unname(rep2geno[celltype_props_sub$sample_id])
+celltype_props_sub$genotype_group <- factor(celltype_props_sub$genotype_group, levels = c("NT", "CD55-KO"))
+
+# Rename Tumor → Cancer cells
+celltype_props_sub$celltype_broad <- as.character(celltype_props_sub$celltype_broad)
+celltype_props_sub$celltype_broad[celltype_props_sub$celltype_broad == "Tumor"] <- "Cancer cells"
+
+# Set facet order
+celltype_order <- c(
+  "Cancer cells",
+  "Macrophages",
+  "Neutrophils",
+  "T cells",
+  "Fibroblasts",
+  "Endothelial cells"
+)
+celltype_props_sub$celltype_broad <- factor(celltype_props_sub$celltype_broad, levels = celltype_order)
+
+## ------------------------------------------------------------
+## 1) Statistical testing (Wilcoxon per cell type)
+## ------------------------------------------------------------
+
+stats_tb <- celltype_props_sub %>%
+  group_by(celltype_broad) %>%
+  wilcox_test(prop ~ genotype_group) %>%
+  adjust_pvalue(method = "BH") %>%
+  add_significance("p.adj") %>%
+  add_xy_position(x = "genotype_group") %>%
+  ungroup()
+
+stats_tb$celltype_broad <- factor(as.character(stats_tb$celltype_broad), levels = celltype_order)
+
+## ------------------------------------------------------------
+## 2) Plot: replicate-level boxplots
+## ------------------------------------------------------------
+
+pal_genotype <- c(
+  "NT"      = "#4D6C8A",
+  "CD55-KO" = "#D1785F"
+)
+
+p_box_nat <- ggplot(
+  celltype_props_sub,
+  aes(x = genotype_group, y = prop, fill = genotype_group)
+) +
+  geom_boxplot(
+    width = 0.6,
+    outlier.shape = NA,
+    color = "black",
+    linewidth = 0.4,
+    alpha = 0.7
+  ) +
+  geom_point(
+    position = position_jitter(width = 0.12, height = 0),
+    size = 2.2,
+    shape = 21,
+    stroke = 0.4,
+    color = "black"
+  ) +
+  scale_fill_manual(values = pal_genotype) +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1),
+    expand = expansion(mult = c(0.05, 0.2))
+  ) +
+  labs(
+    x = NULL,
+    y = "Fraction of cells",
+    fill = NULL
+  ) +
+  facet_wrap(
+    ~ celltype_broad,
+    nrow = 1,
+    scales = "free_y"
+  ) +
+  theme_classic(base_size = 10) +
+  theme(
+    axis.text.x  = element_text(size = 10, color = "black"),
+    axis.text.y  = element_text(size = 10, color = "black"),
+    axis.title.y = element_text(size = 10, color = "black"),
+    axis.line    = element_line(color = "black", linewidth = 0.4),
+    axis.ticks   = element_line(color = "black", linewidth = 0.4),
+    panel.border       = element_rect(color = "black", fill = NA, linewidth = 0.4),
+    strip.background   = element_blank(),
+    strip.text         = element_text(size = 10),
+    legend.position    = "top",
+    legend.direction   = "horizontal",
+    legend.justification = "center",
+    legend.text        = element_text(size = 11),
+    panel.spacing      = unit(0.6, "lines")
+  )
+
+p_box_nat
+
+## ------------------------------------------------------------
+## 3) Replicate-level t-test table (for reporting)
+## ------------------------------------------------------------
+
+# Group means
+means_tb <- celltype_props_sub %>%
+  group_by(celltype_broad, genotype_group) %>%
+  summarise(mean_prop = mean(prop), .groups = "drop") %>%
+  tidyr::pivot_wider(
+    names_from  = genotype_group,
+    values_from = mean_prop,
+    names_prefix = "mean_"
+  ) %>%
+  mutate(diff_KO_minus_NT = `mean_CD55-KO` - mean_NT)
+
+# T-tests
+ttest_tb <- celltype_props_sub %>%
+  group_by(celltype_broad) %>%
+  t_test(prop ~ genotype_group) %>%
+  adjust_pvalue(method = "BH") %>%
+  ungroup()
+
+# Combine
+ttest_results <- ttest_tb %>%
+  left_join(means_tb, by = "celltype_broad") %>%
+  select(
+    celltype_broad,
+    mean_NT,
+    `mean_CD55-KO`,
+    diff_KO_minus_NT,
+    statistic,
+    df,
+    p,
+    p.adj
+  ) %>%
+  arrange(p)
+
+ttest_results
+
+```
+
+
+## Figure 6I — Macrophage state composition in VBPNA CITE-seq (NT vs Cd55-KO)
+
+This section focuses on the macrophage compartment. It visualizes macrophage sub-states on a WNN-based UMAP and quantifies the relative abundance of each macrophage state by genotype using a stacked proportional barplot (fraction of macrophages per genotype). The code assumes that a macrophage-only Seurat object has been generated previously (e.g., by subsetting the full CITE-seq object) and that it contains a WNN UMAP reduction (`wnn.umap`) and a metadata column `macrophage_state`.
+
+
+```{r}
+
+# ============================================================
+# Figure 6I — Macrophage state investigation (UMAP + composition)
+# ============================================================
+
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+library(scales)
+
+# ------------------------------------------------------------
+# Load macrophage-only Seurat object
+# ------------------------------------------------------------
+
+macrophages <- readRDS("cite_macrophages.rds")
+
+# Sanity checks (fail early with informative errors)
+stopifnot(inherits(macrophages, "Seurat"))
+stopifnot("wnn.umap" %in% names(macrophages@reductions))
+stopifnot(all(c("macrophage_state", "genotype") %in% colnames(macrophages@meta.data)))
+
+# ------------------------------------------------------------
+# Define color palette for macrophage states
+# ------------------------------------------------------------
+mac_state_cols <- c(
+  "General macrophages (Ms4a7+)"               = "#A48CCB",
+  "MHC-II-high antigen-presenting macrophages" = "#7FA8D1",
+  "IFN-responsive macrophages"                 = "#F29E8E",
+  "Inflammatory macrophages"                   = "#F2C879",
+  "Monocyte-like macrophages"                  = "#8BC0A9",
+  "Hypoxia-associated TAMs"                    = "#E6A8C3",
+  "Lipid-associated macrophages (TREM2+)"      = "#6CB7C8",
+  "Stress-associated macrophages"              = "#C6A36F"
+)
+
+# Optional: warn if macrophage_state contains unexpected levels
+missing_states <- setdiff(unique(as.character(macrophages$macrophage_state)), names(mac_state_cols))
+if (length(missing_states) > 0) {
+  message("WARNING: These macrophage_state levels have no color mapping: ",
+          paste(missing_states, collapse = ", "))
+}
+
+# ------------------------------------------------------------
+# Panel 1: WNN UMAP colored by macrophage state
+# ------------------------------------------------------------
+p_mac_umap <- DimPlot(
+  macrophages,
+  reduction = "wnn.umap",
+  group.by  = "macrophage_state",
+  label     = FALSE,
+  pt.size   = 1,
+  cols      = mac_state_cols
+) +
+  ggtitle("Macrophage states (WNN UMAP)") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+p_mac_umap
+
+# ------------------------------------------------------------
+# Panel 2: Macrophage state composition by genotype
+# ------------------------------------------------------------
+meta_mac <- macrophages@meta.data %>%
+  transmute(
+    genotype = as.character(genotype),
+    macrophage_state = as.character(macrophage_state)
+  )
+
+# Harmonize genotype label (optional; keeps consistent with other figures)
+meta_mac$genotype <- ifelse(meta_mac$genotype == "CD55_KO", "CD55-KO", meta_mac$genotype)
+
+# Stable legend/facet order
+meta_mac$macrophage_state <- factor(meta_mac$macrophage_state, levels = names(mac_state_cols))
+meta_mac$genotype <- factor(meta_mac$genotype, levels = c("NT", "CD55-KO"))
+
+p_mac_comp <- ggplot(
+  meta_mac,
+  aes(x = genotype, fill = macrophage_state)
+) +
+  geom_bar(position = "fill", colour = "black", linewidth = 0.5) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_fill_manual(values = mac_state_cols, drop = FALSE) +
+  labs(
+    x = "Genotype",
+    y = "Fraction of macrophages",
+    fill = "Macrophage state"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    axis.text.x  = element_text(size = 12, angle = 45, hjust = 1),
+    axis.text.y  = element_text(size = 12),
+    legend.title = element_text(size = 12),
+    legend.text  = element_text(size = 11),
+    legend.position = "left",
+    axis.line  = element_line(linewidth = 0.8),
+    axis.ticks = element_line(linewidth = 0.8),
+    axis.ticks.length = unit(3, "mm")
+  )
+
+p_mac_comp
+
+# ------------------------------------------------------------
+# Optional: export
+# ------------------------------------------------------------
+# dir.create("results", showWarnings = FALSE)
+# ggsave("results/Fig6I_macrophage_states_wnnUMAP.png", p_mac_umap, width = 7, height = 5.5, dpi = 400)
+# ggsave("results/Fig6I_macrophage_state_composition.png", p_mac_comp, width = 7, height = 4.5, dpi = 400)
+
+
+```
+
+
+## Figure 6J — Macrophage analyses (genotype overlay UMAP, CD88 ADT, and IFN-responsive fraction)
+
+This section contains all analyses related to the macrophage compartment used in Figure 6J.
+It includes three components:
+
+1. A WNN-UMAP overlay showing the spatial distribution of macrophages by genotype
+   (CD55_KO in the background, NT in the foreground).
+2. Replicate-level comparison of CD88 (C5aR1) ADT expression in macrophages between
+   NT and CD55_KO tumors.
+3. Replicate-level comparison of the fraction of IFN-responsive macrophages between
+   NT and CD55_KO, based on within-replicate cell-type proportions.
+
+All statistics are computed at the biological replicate (tumor) level.
+
+```{r}
+
+# ============================================================
+# Figure 6J — Macrophage investigation
+#   (1) Genotype overlay on WNN UMAP
+#   (2) CD88 (C5aR1) ADT expression
+#   (3) IFN-responsive macrophage fraction
+# ============================================================
+
+# ============================================================
+# (1) Overlay WNN UMAP: CD55_KO (background) vs NT (foreground)
+# Visualizes spatial distribution of macrophages by genotype
+# on the shared WNN embedding. KO cells are drawn first (back),
+# NT cells on top with black outline.
+# ============================================================
+
+library(Seurat)
+library(ggplot2)
+library(dplyr)
+
+# Consistent genotype color palette
+pal_genotype <- c(
+    "NT"      = "#4D6C8A",
+    "CD55_KO" = "#D1785F"
+)
+
+# Extract WNN UMAP coordinates and genotype labels
+umap_mac <- as.data.frame(Embeddings(macrophages, "wnn.umap"))
+colnames(umap_mac) <- c("UMAP_1", "UMAP_2")
+umap_mac$genotype <- as.character(macrophages$genotype)
+
+# Keep only genotypes of interest and enforce plotting order
+umap_mac <- umap_mac %>%
+    filter(genotype %in% names(pal_genotype)) %>%
+    mutate(genotype = factor(genotype, levels = c("CD55_KO", "NT")))
+
+# Overlay plot: KO in background, NT in foreground
+p_overlay_mac <- ggplot(umap_mac, aes(UMAP_1, UMAP_2)) +
+    
+    # CD55_KO cells (background layer)
+    geom_point(
+        data = subset(umap_mac, genotype == "CD55_KO"),
+        aes(color = genotype),
+        size  = 2,
+        alpha = 0.45
+    ) +
+    
+    # NT cells (foreground, outlined)
+    geom_point(
+        data = subset(umap_mac, genotype == "NT"),
+        aes(fill = genotype),
+        shape  = 21,
+        color  = "black",
+        stroke = 0.30,
+        size   = 2,
+        alpha  = 0.95
+    ) +
+    
+    # Manual color scales and clean, publication-style layout
+    scale_color_manual(values = pal_genotype, name = "Genotype") +
+    scale_fill_manual(values  = pal_genotype, name = "Genotype") +
+    theme_void() +
+    theme(
+        legend.position = "bottom",
+        legend.title    = element_text(size = 14),
+        legend.text     = element_text(size = 13),
+        legend.key      = element_blank(),
+        plot.margin     = margin(5, 5, 5, 5)
+    ) +
+    
+    # Single combined legend (using filled symbols)
+    guides(
+        color = "none",
+        fill  = guide_legend(
+            override.aes = list(shape = 21, size = 6, alpha = 1, color = "black")
+        )
+    )
+
+p_overlay_mac
+
+
+# ============================================================
+# (2) CD88 (C5aR1) ADT expression per tumor
+# Quantifies mean CD88 surface expression in macrophages
+# per biological sample and compares NT vs CD55_KO by t-test.
+# ============================================================
+
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+
+macrophages_clean <- macrophages
+
+# Switch to ADT assay for protein-level quantification
+DefaultAssay(macrophages_clean) <- "ADT"
+
+# Extract CD88, sample, and genotype
+cd88_df <- FetchData(
+  macrophages_clean,
+  vars = c("Ms.CD88", "sample", "genotype")
+)
+colnames(cd88_df)[1] <- "CD88"
+
+# Average CD88 per tumor (replicate-level summary)
+cd88_tumor <- cd88_df %>%
+  group_by(genotype, sample) %>%
+  summarise(mean_CD88 = mean(CD88, na.rm = TRUE), .groups = "drop")
+
+# Statistical comparison between genotypes
+ttest <- t.test(mean_CD88 ~ genotype, data = cd88_tumor)
+print(ttest)
+
+# Boxplot with per-tumor points and t-test p-value
+p_cd88 <- ggplot(cd88_tumor, aes(x = genotype, y = mean_CD88, fill = genotype)) +
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.85, colour = "black") +
+  geom_jitter(width = 0.10, size = 2.5, colour = "black") +
+  stat_compare_means(method = "t.test", label = "p.format") +
+  scale_fill_manual(values = c("NT" = "royalblue4", "CD55_KO" = "#C5705D")) +
+  labs(
+    x = "Genotype",
+    y = "Mean CD88 per tumor",
+    title = "CD88 (C5aR1) expression in macrophages"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5, face = "bold"))
+
+p_cd88
+
+
+# ============================================================
+# (3) IFN-responsive macrophage fraction per replicate
+# Computes, for each tumor, the fraction of macrophages
+# assigned to the IFN-responsive state and compares
+# NT vs CD55_KO at the replicate level.
+# ============================================================
+
+library(scales)
+library(rstatix)
+
+md_mac <- macrophages@meta.data
+
+# Extract replicate, state, and genotype information
+replicate_id <- as.character(md_mac$replicate)
+state        <- as.character(md_mac$macrophage_state)
+genotype     <- as.character(md_mac$genotype)
+
+# Harmonize genotype labels
+genotype_group <- ifelse(genotype == "CD55_KO", "CD55-KO", genotype)
+genotype_group <- factor(genotype_group, levels = c("NT", "CD55-KO"))
+
+# Compute per-replicate state proportions using contingency tables
+tab_state  <- table(replicate_id, state)
+prop_state <- prop.table(tab_state, margin = 1)
+
+# Extract IFN-responsive macrophage fraction
+ifn_vec <- prop_state[, "IFN-responsive macrophages"]
+
+ifn_props <- data.frame(
+  replicate = names(ifn_vec),
+  prop      = as.numeric(ifn_vec),
+  stringsAsFactors = FALSE
+)
+
+# Map genotype to each replicate
+rep2geno <- tapply(as.character(genotype_group), replicate_id, function(x) unique(x)[1])
+ifn_props$genotype_group <- unname(rep2geno[ifn_props$replicate])
+ifn_props$genotype_group <- factor(ifn_props$genotype_group, levels = c("NT", "CD55-KO"))
+
+# Replicate-level statistical test
+stats_ifn <- ifn_props %>%
+  t_test(prop ~ genotype_group) %>%
+  add_xy_position(x = "genotype_group")
+
+# Plot fraction with boxplot, points, and p-value
+pal_genotype <- c(
+  "NT"      = "#4D6C8A",
+  "CD55-KO" = "#D1785F"
+)
+
+p_ifn <- ggplot(ifn_props, aes(x = genotype_group, y = prop, fill = genotype_group)) +
+  geom_boxplot(width = 0.6, outlier.shape = NA, color = "black", linewidth = 0.4, alpha = 0.7) +
+  geom_point(position = position_jitter(width = 0.12, height = 0),
+             size = 2.2, shape = 21, stroke = 0.4, color = "black") +
+  scale_fill_manual(values = pal_genotype) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(x = NULL, y = "Fraction of IFN-responsive macrophages", fill = NULL) +
+  stat_pvalue_manual(stats_ifn, label = "p", tip.length = 0.01, size = 4, inherit.aes = FALSE) +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  )
+
+p_ifn
+
+```
+
+
+## Figure 6K — Neutrophil state composition in NT and CD55-KO tumors
+
+This section characterizes neutrophil heterogeneity in the VBPNA CITE-seq dataset. It shows (i) the WNN-UMAP of neutrophil sub-states, and (ii) the relative abundance of each neutrophil state in NT versus CD55-KO tumors, visualized as stacked proportions per genotype.
+
+```{r}
+
+############################################################
+## Figure 6K — Neutrophil genotypes and state composition
+##   (1) WNN-UMAP of neutrophil transcriptional states
+##   (2) Genotype-wise proportion of neutrophil states
+############################################################
+
+# Load neutrophil-only Seurat object
+neutrophils <- readRDS("cite_neutrophils")
+
+# Define a consistent color palette for neutrophil states
+neut_state_cols <- c(
+  "Classical / resting neutrophils"             = "#A4B9D9",
+  "Immature neutrophils (gMDSC-like)"           = "#F2C879",
+  "Activated / inflammatory TANs"               = "#F29E8E",
+  "Vessel-associated / migratory neutrophils"  = "#8BC0A9"
+)
+
+############################################################
+## (1) UMAP of neutrophil states (WNN embedding)
+## Visualizes transcriptional heterogeneity of neutrophils
+## and their organization in low-dimensional space.
+############################################################
+
+neutrophils_clean <- neutrophils
+
+DimPlot(
+  neutrophils_clean,
+  reduction = "wnn.umap",
+  group.by  = "neutrophil_state",
+  cols      = neut_state_cols
+)
+
+############################################################
+## (2) Proportion barplot of neutrophil states per genotype
+## Quantifies relative contribution of each neutrophil state
+## in NT versus CD55_KO tumors.
+############################################################
+
+# Extract metadata for plotting
+meta_neut <- neutrophils_clean@meta.data
+
+# Enforce stable ordering of neutrophil states
+meta_neut$neutrophil_state <- factor(
+  meta_neut$neutrophil_state,
+  levels = names(neut_state_cols)
+)
+
+# Enforce genotype order
+meta_neut$genotype <- factor(meta_neut$genotype, levels = c("NT", "CD55_KO"))
+
+# Stacked barplot showing within-genotype state proportions
+p_neut_prop <- ggplot(
+  meta_neut,
+  aes(x = genotype, fill = neutrophil_state)
+) +
+  geom_bar(position = "fill", colour = "black", linewidth = 0.5) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_fill_manual(values = neut_state_cols) +
+  labs(
+    x = "Genotype",
+    y = "Fraction of neutrophils",
+    fill = "Neutrophil state"
+  ) +
+  theme_classic() +
+  theme(
+    axis.title.x = element_text(size = 18),
+    axis.title.y = element_text(size = 18),
+    axis.text.x  = element_text(size = 14, angle = 45, hjust = 1),
+    axis.text.y  = element_text(size = 14),
+    legend.title = element_text(size = 15),
+    legend.text  = element_text(size = 15),
+    legend.position = "left",
+    axis.line  = element_line(size = 1.1),
+    axis.ticks = element_line(size = 1.1),
+    axis.ticks.length = unit(3.5, "mm")
+  )
+
+p_neut_prop
+
+```
+
+
+## Figure 6L — Neutrophil state remodeling and CD88 expression in NT and CD55-KO tumors
+
+This section analyzes the neutrophil compartment in the VBPNA CITE-seq dataset. It includes: (i) a genotype-overlay WNN-UMAP highlighting the spatial distribution of NT and CD55-KO neutrophils, (ii) replicate-level comparison of CD88 (C5aR1) ADT expression in neutrophils between genotypes, and (iii) replicate-level quantification and statistical comparison of the fraction of activated/inflammatory tumor-associated neutrophils (TANs) in NT versus CD55-KO tumors. All statistical tests are performed at the biological replicate level.
+
+
+```{r}
+
+############################################################
+## Figure 6L — Neutrophil compartment analysis (NT vs CD55_KO)
+## (i) Genotype overlay on WNN UMAP
+## (ii) CD88 (C5aR1) ADT expression per tumor
+## (iii) Fraction of inflammatory TANs per replicate
+############################################################
+
+
+#############################
+# (i) Genotype overlay UMAP
+#############################
+
+# Extract WNN UMAP coordinates from the neutrophil Seurat object
+umap_df <- as.data.frame(Embeddings(neutrophils_clean, "wnn.umap"))
+colnames(umap_df) <- c("UMAP_1", "UMAP_2")
+
+# Add genotype annotation for each cell
+umap_df$genotype <- neutrophils_clean$genotype
+
+# Define consistent color palette for genotypes
+pal_genotype <- c(
+  "NT"      = "#4D6C8A",
+  "CD55_KO" = "#D1785F"
+)
+
+# Plot KO cells first (background), then NT cells on top (foreground)
+p_neut_overlay <- ggplot() +
+  geom_point(
+    data = umap_df %>% filter(genotype == "CD55_KO"),
+    aes(x = UMAP_1, y = UMAP_2, color = genotype),
+    size  = 1.7,
+    alpha = 0.75
+  ) +
+  geom_point(
+    data = umap_df %>% filter(genotype == "NT"),
+    aes(x = UMAP_1, y = UMAP_2, color = genotype),
+    size  = 2.4,
+    alpha = 0.95,
+    stroke = 0.35
+  ) +
+  scale_color_manual(values = pal_genotype, name = "Genotype") +
+  theme_void() +
+  theme(
+    legend.position   = "bottom",
+    legend.title      = element_text(size = 14),
+    legend.text       = element_text(size = 13),
+    legend.key        = element_blank(),
+    legend.box.margin = margin(t = 6),
+    plot.margin       = margin(5, 5, 5, 5)
+  ) +
+  guides(
+    color = guide_legend(
+      override.aes = list(size = 6, alpha = 1)
+    )
+  )
+
+p_neut_overlay
+
+
+#############################
+# (ii) CD88 (C5aR1) ADT levels
+#############################
+
+# Switch to ADT assay for surface protein quantification
+DefaultAssay(neutrophils_clean) <- "ADT"
+
+# Extract CD88 expression, sample ID, and genotype
+cd88_df <- FetchData(
+  neutrophils_clean,
+  vars = c("Ms.CD88", "sample", "genotype")
+)
+colnames(cd88_df)[1] <- "CD88"
+
+# Average CD88 expression per tumor (biological replicate)
+cd88_tumor <- cd88_df %>%
+  group_by(genotype, sample) %>%
+  summarise(mean_CD88 = mean(CD88, na.rm = TRUE), .groups = "drop")
+
+# Perform replicate-level t-test between genotypes
+ttest <- t.test(mean_CD88 ~ genotype, data = cd88_tumor)
+print(ttest)
+
+# Plot per-tumor CD88 means with statistical annotation
+p <- ggplot(cd88_tumor, aes(x = genotype, y = mean_CD88, fill = genotype)) +
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.85, colour = "black") +
+  geom_jitter(width = 0.10, size = 2.5, colour = "black") +
+  stat_compare_means(method = "t.test", label = "p.format") +
+  scale_fill_manual(values = c("NT" = "royalblue4", "CD55_KO" = "#C5705D")) +
+  labs(
+    x = "Genotype",
+    y = "Mean CD88 per tumor",
+    title = "CD88 (C5aR1) expression in neutrophils"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+print(p)
+
+
+############################################
+# (iii) Fraction of inflammatory TANs
+############################################
+
+# Access neutrophil metadata
+md_neut <- neutrophils@meta.data
+
+# Use sample names to derive biological replicate IDs
+s <- as.character(md_neut$sample)
+
+# Extract genotype block (e.g., VBPNA-NT, VBPNA-Cd55-1, etc.)
+geno_block <- sub("^(VBPNA-(NT|Cd55-[0-9]+)).*", "\\1", s)
+
+# Number replicates within each genotype block
+replicate_num <- ave(
+  s, geno_block,
+  FUN = function(x) paste0(seq_along(unique(x))[match(x, unique(x))])
+)
+
+# Final replicate identifier (genotype + index)
+replicate_id <- paste0(geno_block, "-", replicate_num)
+
+# Extract neutrophil state and genotype
+state    <- as.character(md_neut$neutrophil_state)
+genotype <- as.character(md_neut$genotype)
+genotype <- factor(genotype, levels = c("NT", "CD55_KO"))
+
+# Build replicate-by-state contingency table
+tab_state  <- table(replicate_id, state)
+
+# Convert counts to within-replicate proportions
+prop_state <- prop.table(tab_state, margin = 1)
+
+# Extract fraction of activated / inflammatory TANs
+tan_name <- "Activated / inflammatory TANs"
+tan_vec  <- prop_state[, tan_name]
+
+tan_props <- data.frame(
+  replicate = names(tan_vec),
+  prop      = as.numeric(tan_vec),
+  stringsAsFactors = FALSE
+)
+
+# Map genotype to each replicate
+rep2geno <- tapply(as.character(genotype), replicate_id, function(x) unique(x)[1])
+tan_props$genotype <- unname(rep2geno[tan_props$replicate])
+tan_props$genotype <- factor(tan_props$genotype, levels = c("NT", "CD55_KO"))
+
+# Perform replicate-level statistical test
+stats_tan <- tan_props %>%
+  t_test(prop ~ genotype) %>%
+  add_xy_position(x = "genotype")
+
+# Plot replicate-level fractions with boxplot and p-value
+p_tan <- ggplot(tan_props, aes(x = genotype, y = prop, fill = genotype)) +
+  geom_boxplot(width = 0.6, outlier.shape = NA, color = "black", linewidth = 0.4, alpha = 0.7) +
+  geom_point(
+    position = position_jitter(width = 0.12, height = 0),
+    size = 2.2, shape = 21, stroke = 0.4, color = "black"
+  ) +
+  scale_fill_manual(values = pal_genotype) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    x = NULL,
+    y = "Fraction of inflammatory TANs",
+    fill = NULL
+  ) +
+  stat_pvalue_manual(
+    stats_tan,
+    label = "p",
+    tip.length = 0.01,
+    size = 4,
+    inherit.aes = FALSE
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  )
+
+p_tan
+
+
+
+```
+
+
+
+
+
+
+
