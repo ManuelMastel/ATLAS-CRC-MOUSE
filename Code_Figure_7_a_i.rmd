@@ -1,0 +1,932 @@
+---
+title: "Figure 7 – Cross-species analysis of CD55-associated immune-regulatory epithelial states in colorectal cancer"
+author: Manuel Mastel
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  results = "hide",   # hide printed text, keep plots
+  fig.align = "center",
+  fig.width = 12,
+  fig.height = 7
+)
+
+```
+
+
+This R Notebook reproduces analyses and visualizations associated with Figure 7, which characterizes a CD55-high, immune-regulatory epithelial program in human colorectal cancer and its conservation in genetically engineered mouse models. Starting from the preprocessing and harmonization of single-cell and pseudobulk datasets, the notebook systematically reconstructs each figure panel, including lineage-resolved UMAP projections, stage-dependent cellular composition, cross-species ecosystem comparisons, module-score density maps, correlation analyses, and pseudobulk differential expression across disease stages. Together, these analyses define the spatial, transcriptional, and quantitative relationships between CD55 expression, an interferon- and complement-associated epithelial state (IRC program), and tumor progression, providing a unified framework for cross-species comparison of immune-evasive tumor cell states.
+
+
+## Preprocessing: Import and harmonization of human colorectal cancer scRNA-seq data (Cheng et al., Nature Cancer 2024)
+
+Section description (Markdown paragraph under the title):
+This section describes the preprocessing workflow used to import the publicly available human colorectal cancer single-cell RNA-sequencing dataset from Cheng et al. (Nature Cancer, 2024) into a Seurat-compatible format. The AnnData (.h5ad) object is read using zellkonverter to extract cell-level metadata and low-dimensional embeddings, while the gene expression count matrix is accessed on disk via BPCells to enable memory-efficient handling of the large dataset. Cell barcodes are harmonized between the expression matrix and metadata, a Seurat object is constructed with on-disk backing of the RNA assay, and precomputed UMAP coordinates are attached when available. This processed object serves as the common input for all downstream analyses and visualizations shown in Figure 7.
+
+
+```{r}
+
+############################################################
+# Figure 7 (Preprocessing; not shown in paper)
+# Import Sijin Cheng et al. Nature Cancer 2024 human CRC scRNA-seq
+# AnnData (.h5ad) -> Seurat object (counts on disk via BPCells)
+#
+# Paper: "Integrative single-cell analysis of human colorectal cancer reveals
+#        patient stratification with distinct immune evasion mechanisms"
+# Data availability: https://www.nature.com/articles/s43018-024-00807-z#data-availability
+#
+# Output: Seurat object 'obj' with:
+#   - RNA assay counts backed on disk (BPCells)
+#   - metadata from AnnData obs (colData)
+#   - optional UMAP embedding if present in reducedDims
+############################################################
+
+## ---------------------------
+## 0) Setup
+## ---------------------------
+
+# Set a reproducible seed for any downstream steps (not strictly needed here,
+# but useful if you later extend this script).
+set.seed(1)
+
+## ---------------------------
+## 1) Load libraries
+## ---------------------------
+
+suppressPackageStartupMessages({
+  library(Seurat)
+
+  # Reads AnnData as SingleCellExperiment via Bioconductor
+  library(zellkonverter)
+  library(SingleCellExperiment)
+  library(SummarizedExperiment)
+
+  # On-disk matrix access
+  library(BPCells)
+})
+
+## ---------------------------
+## 2) Read AnnData metadata (+ reduced dims) as SingleCellExperiment
+## ---------------------------
+# readH5AD() returns a SingleCellExperiment (SCE) containing:
+# - colData(sce): cell-level metadata (AnnData .obs)
+# - reducedDims(sce): embeddings (e.g., UMAP) if stored in the file
+# - assays(sce): expression matrices (may be large; we will not rely on this for counts)
+
+message("Reading AnnData metadata with zellkonverter...")
+# adapt the hard directory to your file
+sce <- readH5AD("/Users/a013-admin/Desktop/Bioinfo/Public Data Set/adata_AllAnnotated.h5ad", use_hdf5 = TRUE)  # use_hdf5=TRUE is helpful for large datasets
+
+library(BPCells)
+
+## 2) Open the count matrix on disk (no big RAM hit)
+# adapt the hard directory to your file
+# Try main matrix first; switch to "raw/X" or "layers/counts" if needed
+counts <- BPCells::open_matrix_anndata_hdf5("/Users/a013-admin/Desktop/Bioinfo/Public Data Set/adata_AllAnnotated.h5ad", group = "X")
+
+
+obs  <- as.data.frame(SummarizedExperiment::colData(sce))
+
+
+# 3) match cell order
+common <- intersect(colnames(counts), rownames(obs))
+counts <- counts[, common]
+obs    <- obs[common, , drop = FALSE]
+
+
+# 4) build Seurat object (counts stay on disk)
+obj <- CreateSeuratObject(counts = counts, meta.data = obs, assay = "RNA")
+
+
+# (optional) make the namespace available
+# BiocManager::install("SingleCellExperiment")
+library(SingleCellExperiment)
+
+# 5) add UMAP if present  --- use SingleCellExperiment:: functions
+if ("X_umap" %in% SingleCellExperiment::reducedDimNames(sce)) {
+  umap <- as.matrix(SingleCellExperiment::reducedDim(sce, "X_umap"))
+
+  # keep only the cells you kept in 'common' (and in the same order)
+  umap <- umap[common, , drop = FALSE]
+
+  # nice column names for Seurat
+  if (ncol(umap) == 2) colnames(umap) <- c("UMAP_1","UMAP_2") else
+    colnames(umap) <- paste0("UMAP_", seq_len(ncol(umap)))
+
+  # sanity check alignment
+  stopifnot(identical(rownames(umap), common))
+
+  # attach to Seurat
+  obj[["umap"]] <- CreateDimReducObject(
+    embeddings = umap,
+    key = "UMAP_",
+    assay = "RNA"
+  )
+}
+
+# 6 quick test
+DimPlot(obj, reduction = "umap", group.by = "ParentalCluster")
+DimPlot(obj, reduction = "umap", group.by = "GrandparentalCluster")
+
+```
+
+
+
+## Figure 7b: UMAP projection of epithelial cells across disease stages (Normal tissue, Adenoma, Carcinoma)
+
+Section description (Markdown paragraph under the title):
+This panel visualizes the global transcriptional landscape of human colorectal epithelial cells across progressive disease stages using a two-dimensional UMAP embedding. Cells are subset to three major pathological classes—healthy normal tissue, adenomatous polyps, and invasive carcinoma—based on the annotation provided by Cheng et al. These categories are relabeled to publication-ready terms (“Normal Tissue”, “Adenoma”, and “Carcinoma”), converted to an ordered factor, and displayed using a consistent, color-blind-friendly palette. The resulting projection highlights the continuum of epithelial state transitions from normal mucosa through premalignant lesions to fully malignant carcinoma, providing the reference framework for all subsequent stratified analyses in Figure 7.
+
+```{r}
+
+## ---------------------------
+## Subset and visualize disease classes (Figure 7b)
+## ---------------------------
+# For Figure 7b, we restrict the analysis to three major tissue states:
+#   - Healthy epithelium
+#   - Polyp (adenomatous lesions)
+#   - Tumor (carcinoma)
+#
+# These are encoded in the metadata column 'Class' and will be:
+#   Healthy  -> "Normal Tissue"
+#   Polyp    -> "Adenoma"
+#   T        -> "Carcinoma"
+
+# Keep only the relevant biological states
+obj_sub <- subset(obj, subset = Class %in% c("Healthy", "Polyp", "T"))
+
+# Rename to publication-ready labels
+obj_sub$Class <- plyr::mapvalues(
+  obj_sub$Class,
+  from = c("Healthy", "Polyp", "T"),
+  to   = c("Normal Tissue", "Adenoma", "Carcinoma")
+)
+
+# Enforce clean ordering for legends and downstream plotting
+obj_sub$Class <- factor(
+  obj_sub$Class,
+  levels = c("Normal Tissue", "Adenoma", "Carcinoma")
+)
+
+## ---------------------------
+## Define color scheme for Figure 7b
+## ---------------------------
+# Colors are chosen for:
+#   - Visual contrast
+#   - Consistency with pathology progression (normal → adenoma → carcinoma)
+#   - Color-blind friendliness
+
+cols_class2 <- c(
+  "Normal Tissue" = "#4E79A7",  # blue
+  "Adenoma"       = "orange",   # intermediate lesion
+  "Carcinoma"     = "#E15759"   # red
+)
+
+## ---------------------------
+## UMAP visualization (Figure 7b)
+## ---------------------------
+# This reproduces the class-level projection shown in Fig. 7b,
+# highlighting the continuum from normal epithelium to malignant carcinoma.
+
+DimPlot(
+  obj_sub,
+  group.by  = "Class",
+  cols      = cols_class2,
+  reduction = "umap"
+)
+
+
+```
+
+
+## Figure 7c: UMAP projection colored by major cellular lineages
+
+This panel aggregates the detailed parental cluster annotations into broad lineage classes and visualizes their distribution in the UMAP embedding to delineate epithelial, stromal, and immune compartments in the human CRC atlas.
+
+
+```{r}
+
+## ---------------------------
+## Figure 7c: Define major cellular lineages and visualize on UMAP
+## ---------------------------
+
+library(dplyr)
+library(Seurat)
+library(ggplot2)
+
+# Map fine-grained parental clusters to broad lineage classes used in the manuscript.
+# Note: Unmapped clusters are set to NA and will appear as missing (or can be filtered out if desired).
+obj_sub@meta.data <- obj_sub@meta.data %>%
+  mutate(
+    celltype = case_when(
+      ParentalCluster %in% c("Malignant cells", "Epi") ~ "Epithelial",
+      ParentalCluster == "Fib"                         ~ "Fibroblasts",
+      ParentalCluster %in% c("EC", "Glial")            ~ "Endothelial",
+      ParentalCluster %in% c("Mono/Macro",
+                             "Proliferating Myeloids",
+                             "MAST", "DC")            ~ "Myeloid",
+      ParentalCluster == "Neutrophils"                 ~ "Neutrophils",
+      ParentalCluster %in% c("CD4", "CD8",
+                             "Proliferating T",
+                             "NK", "ILC")             ~ "TNKILC",
+      ParentalCluster %in% c("B", "Plasma")            ~ "Bcells",
+      TRUE                                             ~ NA_character_
+    )
+  )
+
+# Enforce identical factor levels as in the reference object 'tumall'
+# 'tumall' is the Seurat object of the mouse CRC atlas and must be loaded
+# in the R environment before running this chunk. This ensures consistent
+# lineage naming and legend ordering across human and mouse figures.
+
+# read in your mouse object and adapt the hard link before
+tumall <- readRDS("/Users/a013-admin/Desktop/ATLAS_GEN/ATLAS.rds")
+
+obj_sub$celltype <- factor(
+  obj_sub$celltype,
+  levels = levels(tumall$celltype)
+)
+
+## Color palette for major lineage classes (Figure 7c)
+celltype_cols <- c(
+  Epithelial  = "#4E79A7",
+  Myeloid     = "#63A99B",
+  Fibroblasts = "grey70",
+  Endothelial = "#E07BAA",
+  TNKILC      = "#8C8AC8",
+  Bcells      = "#D0B04F"
+)
+
+## UMAP visualization (Figure 7c)
+p_fig7c <- DimPlot(
+  obj_sub,
+  reduction = "umap",
+  group.by  = "celltype",
+  cols      = celltype_cols,
+  label     = FALSE,
+  repel     = TRUE
+) +
+  theme_classic() +
+  theme(
+    legend.title = element_blank(),
+    legend.text  = element_text(size = 10),
+    axis.title   = element_text(size = 10),
+    axis.text    = element_text(size = 8)
+  )
+
+p_fig7c
+
+
+```
+
+## Figure 7d: Lineage composition across human colorectal cancer disease stages
+
+This panel quantifies the relative abundance of major cellular lineages in human colorectal tissue across progressive disease stages. Cells are grouped into broad epithelial, stromal, and immune compartments based on the lineage classification defined in Figure 7c, and their proportions are calculated separately for normal mucosa, adenomatous polyps, and invasive carcinoma. Stacked bar plots depict the fractional contribution of each lineage within each stage, enabling a direct comparison of how the cellular composition of the tumor ecosystem is remodeled during the transition from normal tissue through premalignant lesions to overt carcinoma.
+
+
+```{r}
+## ---------------------------
+## Figure 7d (human): Cell-type composition across disease classes
+## ---------------------------
+# This panel summarizes the relative abundance of major cellular lineages
+# across human disease classes (Normal Tissue, Adenoma, Carcinoma) in the
+# Cheng et al. dataset.
+#
+# Assumptions:
+# - 'obj_sub' exists (human Seurat object already subset/relabelled to the 3 classes).
+# - 'obj_sub$celltype' contains the harmonized broad lineage classes
+#   (e.g., created in Figure 7c).
+# - 'obj_sub$Class' contains the relabeled disease classes:
+#     "Normal Tissue", "Adenoma", "Carcinoma"
+#
+# Output:
+# - Stacked proportion bar plot by Class.
+
+library(dplyr)
+library(ggplot2)
+library(tibble)
+
+## 1) Canonical lineage levels and shared palette (same as mouse) --------------
+ct_levels <- c("Epithelial", "Myeloid", "Fibroblasts", "Endothelial", "TNKILC", "Bcells")
+
+celltype_cols <- c(
+  Epithelial  = "#4E79A7",
+  Myeloid     = "#63A99B",
+  Fibroblasts = "grey70",
+  Endothelial = "#E07BAA",
+  TNKILC      = "#8C8AC8",
+  Bcells      = "#D0B04F"
+)
+
+## 2) Extract metadata and compute proportions --------------------------------
+meta_human <- obj_sub@meta.data %>%
+  as.data.frame() %>%
+  rownames_to_column("cell") %>%
+  mutate(
+    Class    = as.character(Class),
+    celltype = as.character(celltype)
+  )
+
+df_prop_stage_human <- meta_human %>%
+  filter(
+    !is.na(Class),
+    !is.na(celltype),
+    Class %in% c("Normal Tissue", "Adenoma", "Carcinoma"),
+    celltype %in% ct_levels
+  ) %>%
+  mutate(
+    Class    = factor(Class, levels = c("Normal Tissue", "Adenoma", "Carcinoma")),
+    celltype = factor(celltype, levels = ct_levels)
+  ) %>%
+  count(Class, celltype, name = "n") %>%
+  group_by(Class) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+## 3) Plot --------------------------------------------------------------------
+p_fig7d <- ggplot(
+  df_prop_stage_human,
+  aes(x = Class, y = prop, fill = celltype)
+) +
+  geom_col(width = 0.8, color = "black", linewidth = 0.3) +
+  scale_y_continuous(
+    breaks = c(0, 0.25, 0.5, 0.75, 1),
+    labels = function(x) x * 100,
+    expand = expansion(mult = c(0, 0))
+  ) +
+  scale_fill_manual(
+    values = celltype_cols,
+    breaks = ct_levels,
+    limits = ct_levels,
+    drop   = FALSE
+  ) +
+  labs(x = NULL, y = "Cell type (%)") +
+  theme_classic(base_size = 16) +
+  theme(
+    axis.text.x  = element_text(angle = 45, hjust = 1, vjust = 1),
+    legend.title = element_blank()
+  )
+
+p_fig7d
+
+
+
+```
+
+
+## Figure 7e: Lineage composition across tumor stages in mouse colorectal cancer models
+
+This panel depicts the stage-dependent remodeling of the tumor ecosystem in genetically engineered mouse models of colorectal cancer. Using the mouse CRC atlas (tumall), cells are classified into the same major lineage compartments defined for the human data (epithelial, fibroblastic, endothelial, and immune subsets), and their relative proportions are computed for normal tissue, adenomas, and carcinomas. Stacked bar plots illustrate how epithelial expansion, stromal activation, and immune infiltration evolve during tumor progression in vivo, enabling a direct cross-species comparison of lineage dynamics between human disease (Figure 7d) and its corresponding mouse models.
+
+
+```{r}
+
+## ---------------------------
+## Figure 7e (mouse): Cell-type composition across tumor stages
+## ---------------------------
+## Uses:
+##   - tumall$cell_types  (cell-type / lineage label)
+##   - tumall$tum_stage   (Normal tissue / Adenoma / Carcinoma)
+## Output:
+##   - df_prop_stage_mouse (stage x cell_types counts + proportions)
+##   - p_fig7e stacked barplot
+## ---------------------------
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(tibble)
+  library(stringr)
+})
+
+## ============================================================
+## 1) Settings: stage order + cell-type order + colors
+## ============================================================
+
+stage_levels <- c("Normal tissue", "Adenoma", "Carcinoma")
+
+ct_levels <- c(
+  "Epithelial",
+  "Myeloid",
+  "Fibroblasts",
+  "Endothelial",
+  "TNKILC",
+  "Bcells"
+)
+
+celltype_cols <- c(
+  Epithelial  = "#4E79A7",
+  Myeloid     = "#63A99B",
+  Fibroblasts = "grey70",
+  Endothelial = "#E07BAA",
+  TNKILC      = "#8C8AC8",
+  Bcells      = "#D0B04F"
+)
+
+## ============================================================
+## 2) Extract metadata (clean + minimal)
+## ============================================================
+
+meta_mouse <- tumall@meta.data %>%
+  as.data.frame() %>%
+  rownames_to_column("cell") %>%
+  transmute(
+    cell,
+    tum_stage  = str_squish(as.character(tum_stage)),
+    cell_types = str_squish(as.character(cell_types))
+  )
+
+## Optional diagnostics
+message("=== tum_stage values ===")
+print(sort(table(meta_mouse$tum_stage, useNA = "ifany"), decreasing = TRUE))
+
+message("=== cell_types values ===")
+print(sort(table(meta_mouse$cell_types, useNA = "ifany"), decreasing = TRUE))
+
+## ============================================================
+## 3) Proportion table by tumor stage
+## ============================================================
+
+df_prop_stage_mouse <- meta_mouse %>%
+  filter(
+    !is.na(tum_stage),
+    !is.na(cell_types),
+    tum_stage %in% stage_levels
+  ) %>%
+  mutate(
+    tum_stage  = factor(tum_stage, levels = stage_levels),
+    cell_types = factor(cell_types, levels = ct_levels)
+  ) %>%
+  count(tum_stage, cell_types, name = "n") %>%
+  group_by(tum_stage) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+## ============================================================
+## 4) Plot: stacked proportions
+## ============================================================
+
+p_fig7e <- ggplot(
+  df_prop_stage_mouse,
+  aes(x = tum_stage, y = prop, fill = cell_types)
+) +
+  geom_col(width = 0.8, color = "black", linewidth = 0.3) +
+  scale_y_continuous(
+    breaks = c(0, 0.25, 0.5, 0.75, 1),
+    labels = function(x) x * 100,
+    expand = expansion(mult = c(0, 0))
+  ) +
+  scale_fill_manual(
+    values = celltype_cols,
+    breaks = ct_levels,
+    limits = ct_levels,
+    drop   = FALSE
+  ) +
+  labs(x = NULL, y = "Cell type (%)") +
+  theme_classic(base_size = 16) +
+  theme(
+    axis.text.x  = element_text(angle = 45, hjust = 1, vjust = 1),
+    legend.title = element_blank()
+  )
+
+p_fig7e
+
+
+
+```
+
+
+## Figure 7f: Joint PCA of cell-type composition reveals cross-species similarities in tumor ecosystem structure
+
+This panel performs a joint principal component analysis (PCA) of cell-type composition profiles derived from the human CRC atlas (Cheng et al.; samples defined as Class × Patient) and the mouse CRC atlas (tumall; samples defined as tumor stage × tumor hash). For each sample, the relative abundance of major lineages is computed as a compositional vector. Human and mouse matrices are then aligned to a common set of cell-type columns (missing categories set to zero), concatenated, and subjected to PCA. The resulting embedding provides an integrated, quantitative view of how tissue stage–dependent ecosystem composition compares between human disease and mouse models.
+
+```{r}
+
+## ---------------------------
+## Figure 7f: Joint PCA of cell-type composition (Human + Mouse)
+## ---------------------------
+
+library(Seurat)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(scales)
+
+## 1) HUMAN: build Class2–Patient x celltype composition -----------------------
+meta_human <- obj_sub@meta.data %>%
+  as.data.frame() %>%
+  rownames_to_column("cell") %>%
+  filter(
+    !is.na(Class),
+    !is.na(Patient),
+    !is.na(celltype)
+  ) %>%
+  mutate(
+    sample_id = paste(Class, Patient, sep = "-"),
+    celltype  = as.character(celltype)
+  )
+
+tab_human <- xtabs(~ sample_id + celltype, data = meta_human)
+tab_prop_human <- prop.table(tab_human, margin = 1)  # row-wise proportions
+
+
+## 2) MOUSE: build tum_stage–hash.ID x parentalcelltypes composition -----------
+meta_mouse <- tumall@meta.data %>%
+  as.data.frame() %>%
+  filter(
+    !is.na(tum_stage),
+    !is.na(hash.ID),
+    !is.na(celltype)
+  ) %>%
+  mutate(
+    sample_id = paste(tum_stage, hash.ID, sep = "-"),
+    celltype  = as.character(celltype)
+  )
+
+tab_mouse <- xtabs(~ sample_id + celltype, data = meta_mouse)
+tab_prop_mouse <- prop.table(tab_mouse, margin = 1)  # row-wise proportions
+
+
+## 3) Align cell-type columns and combine matrices -----------------------------
+all_celltypes <- union(colnames(tab_prop_human), colnames(tab_prop_mouse))
+
+expand_to <- function(mat, all_cols) {
+  out <- matrix(
+    0,
+    nrow = nrow(mat),
+    ncol = length(all_cols),
+    dimnames = list(rownames(mat), all_cols)
+  )
+  out[rownames(mat), colnames(mat)] <- mat
+  out
+}
+
+mat_human <- expand_to(tab_prop_human, all_celltypes)
+mat_mouse <- expand_to(tab_prop_mouse, all_celltypes)
+
+mat_combined <- rbind(mat_human, mat_mouse)
+
+
+## 4) PCA on combined composition matrix --------------------------------------
+pca_res <- prcomp(mat_combined, scale. = FALSE)
+
+pc_imp <- summary(pca_res)$importance
+varPC1 <- pc_imp[2, 1]
+varPC2 <- pc_imp[2, 2]
+
+scores <- as.data.frame(pca_res$x[, 1:2])
+colnames(scores) <- c("PC1", "PC2")
+scores$sample_id <- rownames(scores)
+
+# Annotate dataset membership
+scores$dataset <- ifelse(scores$sample_id %in% rownames(mat_human), "Human", "Mouse")
+
+# Stage/Class from sample_id (text before first hyphen)
+scores$Class2 <- sub("[-–—].*$", "", scores$sample_id)
+
+# Harmonize naming
+scores$Class2 <- dplyr::recode(scores$Class2, "Normal tissue" = "Normal Tissue")
+
+# Set factor levels to control drawing order: bottom -> top
+# Carcinoma (bottom), Normal Tissue (middle), Adenoma (top)
+scores$Class2 <- factor(
+  scores$Class2,
+  levels = c("Carcinoma", "Normal Tissue", "Adenoma")
+)
+
+# Reorder rows so ggplot draws in this exact order
+scores <- scores %>% arrange(Class2)
+
+
+## 5) Figure 7f plot -----------------------------------------------------------
+cols_class2 <- c(
+  "Normal Tissue" = "#4E79A7",
+  "Adenoma"       = "#F28E2B",
+  "Carcinoma"     = "#E15759"
+)
+
+p_fig7f <- ggplot(scores, aes(x = PC1, y = PC2)) +
+  geom_point(
+    aes(fill = Class2, shape = dataset),
+    size   = 3.5,
+    alpha  = 1,
+    colour = "black",
+    stroke = 0.4
+  ) +
+  coord_equal() +
+  scale_fill_manual(
+    values = cols_class2,
+    drop   = FALSE,
+    name   = "Stage/Class"
+  ) +
+  scale_shape_manual(
+    values = c(Human = 21, Mouse = 22),
+    name   = "Dataset"
+  ) +
+  guides(
+    fill  = guide_legend(override.aes = list(colour = "black", shape = 21)),
+    shape = guide_legend(override.aes = list(colour = "black"))
+  ) +
+  labs(
+    x = paste0("PC1 (", percent(varPC1), ")"),
+    y = paste0("PC2 (", percent(varPC2), ")")
+  ) +
+  theme_classic(base_size = 16) +
+  theme(
+    legend.position = "right",
+    legend.title    = element_text(size = 14),
+    legend.text     = element_text(size = 12)
+  )
+
+p_fig7f
+
+
+
+```
+
+
+## Figure 7g: UMAP density maps of CD55 expression and immune-regulatory (IRC) signature in human epithelial cells
+
+This panel visualizes the spatial distribution of CD55 expression and an immune-regulatory/CD55-high epithelial signature (IRC score) within the human colorectal epithelial compartment. Epithelial cells are subset from the Cheng et al. dataset (Figure 7c classification), and density-based feature overlays are generated on the precomputed UMAP embedding using Nebulosa. CD55 is visualized directly from the RNA assay, while the IRC score is computed using AddModuleScore on a curated gene set capturing barrier/enterocyte features, complement regulation, interferon responses, and inflammasome/stress programs. Both features are displayed using a consistent “fiery” gradient to facilitate direct visual comparison.
+
+```{r}
+
+## ---------------------------
+## Figure 7g: Density maps of CD55 and IRC signature (human epithelium)
+## ---------------------------
+# Goal:
+#   - Restrict analysis to epithelial cells (obj_sub already contains human data)
+#   - Plot UMAP density of CD55 expression (counts)
+#   - Compute an immune-regulatory/CD55-high epithelial signature score (IRC)
+#     and plot its UMAP density (counts)
+#
+# Prerequisites:
+#   - obj_sub: human Seurat object containing:
+#       * celltype annotation (from Fig. 7c)
+#       * a UMAP reduction named "umap"
+#   - Nebulosa installed for plot_density()
+
+library(Seurat)
+library(dplyr)
+library(Nebulosa)
+library(ggplot2)
+
+## 1) Subset to epithelial cells ----------------------------------------------
+obj_epi <- subset(obj_sub, subset = celltype == "Epithelial")
+
+# Ensure we operate on the RNA assay
+DefaultAssay(obj_epi) <- "RNA"
+
+## 2) Define shared color palette (used for both density plots) ---------------
+# A consistent gradient helps compare feature distributions between panels.
+fiery_pal <- c(
+  "grey85",
+  "#D9D9D9",
+  "#E87373",
+  "#D64545",
+  "darkred",
+  "#8B0000"
+)
+
+## 3) CD55 density on UMAP (counts) -------------------------------------------
+# NOTE: Feature name must match exactly what is present in the dataset.
+#       If needed, check with:  "CD55" %in% rownames(obj_epi)
+p_fig7g_cd55 <- plot_density(
+  obj_epi,
+  features  = "CD55",
+  reduction = "umap",
+  slot      = "counts"
+) +
+  scale_color_gradientn(colours = fiery_pal) +
+  theme_classic() +
+  labs(title = "CD55 density on UMAP (counts)")
+
+p_fig7g_cd55
+
+
+## 4) Define IRC gene set (Cluster 4 immune-regulatory / CD55-high; human) ----
+# Curated signature capturing barrier/epithelial genes, complement regulation,
+# interferon response programs, and inflammasome/stress-related genes.
+genes_irc_core_human <- c(
+  ## Barrier / epithelial / immune-enterocyte
+  "LYPD8", "DMBT1", "LGALS4", "PLAC8", "MUC13", "CEACAM1", "CEACAM20", "DHRS9", "LGALS3", "CD38", "SERPINB1", "GPA33", "PLEC", "AHNAK", "TCF7L2",
+  "CD2AP", "FLNB", "GSDMD",
+
+  ## Complement / immune regulation
+  "CD55", "NT5E", "IL1RN", "IL18", "IL34", "CFB", "CX3CL1", "GAS6",
+  "IFNGR1", "IFNGR2", "IL10RB",
+
+  ## Interferon / ISGs
+  "ISG15", "ISG20", "OAS1", "OASL", "DDX60", "ZBP1", "IRF7", "BATF2",
+  "TRIM25", "PARP9", "PARP14", "SAA1", "MALAT1", "RTP4",
+
+  ## Inflammasome / stress / fetal-like
+  "SLFN5", "NLRC4", "CASP1", "PYCARD", "LY6E", "TFCP2L1", "KLF6", "HIF1A",
+  "IFI27", "IFIH1"
+)
+
+## 5) Compute IRC score (module score; counts) --------------------------------
+# AddModuleScore creates one column per gene set, here "IRC1".
+# We compute it using counts to match the CD55 density input.
+# Note: Calculation of module score needs a long time, since the data set is big
+obj_epi <- AddModuleScore(
+  object   = obj_epi,
+  features = list(genes_irc_core_human),
+  name     = "IRC",
+  slot     = "counts"
+)
+
+## 6) IRC density on UMAP (counts) --------------------------------------------
+p_fig7g_irc <- plot_density(
+  obj_epi,
+  features  = "IRC1",
+  reduction = "umap",
+  slot      = "counts"
+) +
+  scale_color_gradientn(colours = fiery_pal) +
+  theme_classic() +
+  labs(title = "IRC density on UMAP (counts)")
+
+p_fig7g_irc
+
+
+```
+
+
+## Figure 7h: Correlation between CD55 expression and immune-regulatory (IRC) program in human epithelial cells
+
+This panel quantifies the relationship between CD55 expression and the immune-regulatory/CD55-high epithelial program (IRC score) within the human colorectal epithelial compartment. Using all epithelial cells, and separately restricting the analysis to CD55-expressing cells, Spearman rank correlations are computed between CD55 transcript counts and the IRC module score derived in Figure 7g. Scatter plots with regression fits illustrate the monotonic association between complement regulation and the broader immune-modulatory epithelial state, providing quantitative support for the coordinated activation of CD55 and the Cluster-4 immune-regulatory transcriptional program.
+
+```{r}
+
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+
+DefaultAssay(obj_epi) <- "RNA"
+
+# 1) Fetch data (counts) and transform CD55
+df_cor <- FetchData(
+  obj_epi,
+  vars = c("IRC1", "CD55"),
+  slot = "counts"
+) %>%
+  transmute(
+    IRC_score = IRC1,
+    CD55_counts = CD55,
+    CD55_expr = log1p(CD55_counts)
+  )
+
+# Optional: restrict to CD55+ only
+# df_cor <- df_cor %>% filter(CD55_counts > 0)
+
+# 2) Spearman correlation
+cor_res <- cor.test(df_cor$IRC_score, df_cor$CD55_expr, method = "spearman")
+
+rho_txt <- formatC(unname(cor_res$estimate), digits = 2, format = "f")
+p_txt <- if (cor_res$p.value < 2.2e-16) "p < 2.2×10^-16" else
+  paste0("p = ", format(cor_res$p.value, digits = 2, scientific = TRUE))
+anno_txt <- paste0("r\u209B=", rho_txt, "\n", p_txt)  # rₛ
+
+# 3) Downsample for LOESS fit (this is the speed trick)
+set.seed(1)
+df_loess <- df_cor %>% sample_n(min(nrow(df_cor), 20000))  # 10k–30k is ideal
+
+# 4) Plot: LOESS smooth + ribbon
+p_fig7h <- ggplot(df_cor, aes(x = IRC_score, y = CD55_expr)) +
+  geom_smooth(
+    data      = df_loess,
+    method    = "loess",
+    formula   = y ~ x,
+    span      = 0.6,
+    se        = TRUE,
+    linewidth = 1.3,
+    colour    = "#8B0000",   # dark red line
+    fill      = "#F4A6A6"    # bright pale red ribbon
+  ) +
+  annotate(
+    "text",
+    x = quantile(df_cor$IRC_score, 0.05, na.rm = TRUE),
+    y = quantile(df_cor$CD55_expr, 0.95, na.rm = TRUE),
+    hjust = 0,
+    vjust = 1,
+    size  = 6,
+    label = anno_txt
+  ) +
+  theme_classic(base_size = 18) +
+  theme(
+    axis.title.x = element_text(size = 28, face = "bold", margin = margin(t = 12)),
+    axis.title.y = element_text(size = 28, face = "bold", margin = margin(r = 12)),
+    axis.text    = element_text(size = 20)
+  ) +
+  labs(
+    x = "IRC-signature",
+    y = expression(italic(CD55)~"expression")
+  )
+
+p_fig7h
+
+
+
+```
+
+
+## Figure 7i: Pseudobulk CD55 expression across human colorectal cancer stages
+
+This panel shows the distribution of CD55 expression across major pathological stages of human colorectal cancer using a patient-level pseudobulk approach. Epithelial cells are aggregated per patient and disease class (Normal Tissue, Adenoma, Carcinoma), and CD55 expression is quantified as edgeR-normalized logCPM values. Boxplots with overlaid individual pseudobulk samples illustrate stage-dependent differences in CD55 abundance, while pairwise Wilcoxon rank-sum tests assess statistical significance between groups. This analysis demonstrates a progressive upregulation of CD55 from normal mucosa through adenoma to carcinoma, supporting a stage-associated activation of complement-regulatory programs in the epithelial compartment.
+
+```{r}
+
+library(Seurat)
+library(SeuratObject)
+library(Matrix)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(ggpubr)
+
+stopifnot(exists("obj_epi"))
+stopifnot(all(c("Patient", "Class") %in% colnames(obj_epi@meta.data)))
+
+obj_epi$Class2 <- factor(
+  as.character(obj_epi$Class),
+  levels = c("Normal Tissue", "Adenoma", "Carcinoma")
+)
+
+# --- CD55 counts (v5-safe) ---
+mat_counts <- LayerData(obj_epi, assay = "RNA", layer = "counts")
+if (!"CD55" %in% rownames(mat_counts)) stop("Gene 'CD55' not found in RNA counts layer.")
+
+cd55_counts <- as.numeric(Matrix::as.matrix(mat_counts["CD55", , drop = FALSE]))
+names(cd55_counts) <- colnames(obj_epi)
+
+# --- per-cell library size ---
+libsize <- obj_epi$nCount_RNA
+if (is.null(libsize)) stop("obj_epi$nCount_RNA not found.")
+stopifnot(length(libsize) == ncol(obj_epi))
+
+# --- aggregate to Patient × Class2 ---
+cell_df <- tibble(
+  cell    = colnames(obj_epi),
+  Patient = obj_epi$Patient,
+  Class2  = obj_epi$Class2,
+  cd55    = cd55_counts,
+  libsize = libsize
+) %>%
+  filter(!is.na(Patient), !is.na(Class2))
+
+df_cd55 <- cell_df %>%
+  group_by(Patient, Class2) %>%
+  summarise(
+    CD55_counts  = sum(cd55, na.rm = TRUE),
+    library_size = sum(libsize, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(library_size > 0) %>%
+  mutate(
+    CD55_CPM    = 1e6 * (CD55_counts / library_size),
+    CD55_logCPM = log2(CD55_CPM + 1)
+  )
+
+cols_class2 <- c(
+  "Normal Tissue" = "#4E79A7",
+  "Adenoma"       = "#F28E2B",
+  "Carcinoma"     = "#E15759"
+)
+
+comparisons <- list(
+  c("Normal Tissue", "Adenoma"),
+  c("Normal Tissue", "Carcinoma"),
+  c("Adenoma",       "Carcinoma")
+)
+
+p_cd55_stage <- ggplot(df_cd55, aes(Class2, CD55_logCPM, fill = Class2)) +
+  geom_boxplot(outlier.shape = NA, linewidth = 0.6, alpha = 0.85) +
+  geom_jitter(width = 0.15, size = 2, alpha = 0.9, shape = 21, colour = "black") +
+  scale_fill_manual(values = cols_class2, drop = FALSE) +
+  theme_classic(base_size = 18) +
+  theme(legend.position = "none", axis.title.x = element_blank()) +
+  labs(y = expression(italic(CD55)~"expression (logCPM, CD55-only pseudobulk)"))
+
+p_cd55_stage
+
+
+```
+
+
+This notebook is intended to be fully reproducible and panel-complete for Figure 7, starting from the import and harmonization of the Cheng et al. human CRC atlas and the matched mouse CRC atlas objects. All variables used in downstream code chunks refer to explicit metadata columns present in the Seurat objects (e.g., Class, Patient, celltype/cell_types) and are standardized early to avoid silent label mismatches. Where you see Class2, it refers to a publication-ready, ordered stage label derived from Class (i.e., “Normal Tissue”, “Adenoma”, “Carcinoma”) and is used only for consistent plotting and sample identifiers. Together, the notebook provides a transparent, end-to-end provenance trail from raw single-cell data structures to the final cross-species ecosystem and IRC/CD55 analyses shown in the manuscript.
+
+
