@@ -19,11 +19,11 @@ We constructed a comprehensive mouse colorectal cancer (CRC) atlas spanning:
 
 Figures 1–7 integrate:
 
-- Cohort and genotype overview (Fig. 1)
+- Cohort and genotype overview (Fig. 1 b)
 - Histopathological stratification (Fig. 1e)
-- Single-cell ecosystem composition (Fig. 2–4)
-- Tumor cell state plasticity and immune-regulatory programs (Fig. 5–6)
-- Cross-species and translational analyses (Fig. 7)
+- Single-cell atlas and investigation (Fig. 2–4)
+- Tumor immune regulatory state determinatino and immune-regulatory programs (Fig. 5–6)
+- Cross-species analysis (Fig. 7)
 
 All panels are generated from the same processed objects used for the manuscript, ensuring full computational reproducibility.
 
@@ -45,11 +45,11 @@ If the notebooks for the figures execute successfully and regenerate the publish
 | Fig. 1b | `Code_Figure_1.Rmd` | Atlas genotype & cohort overview |
 | Fig. 1e | `Code_Figure_1.Rmd` | Histopathology grid by genotype |
 | Fig. 2  | `Code_Figure_2.Rmd` | Single-cell ecosystem composition |
-| Fig. 3  | `Code_Figure_3.Rmd` | Tumor cell states and microenvironment |
-| Fig. 4  | `Code_Figure_4.Rmd` | Lineage trajectories and fate branching |
+| Fig. 3  | `Code_Figure_3.Rmd` | Tumor cell states |
+| Fig. 4  | `Code_Figure_4.Rmd` | IRC state and immune regulation |
 | Fig. 5  | `Code_Figure_5.Rmd` | Immune evasion and regulatory programs |
-| Fig. 6  | `Code_Figure_6.Rmd` | Plasticity, fetal-like and squamous programs |
-| Fig. 7a–i | `Code_Figure_7_a_i.Rmd` | Cross-species state alignment |
+| Fig. 6  | `Code_Figure_6.Rmd` | CD55 loss and CITE-seq experiment |
+| Fig. 7a–i | `Code_Figure_7_a_i.Rmd` | Cross-species validation |
 | Fig. 7j–l | `Code_Figure_7_j_l.Rmd` | TCGA survival and CMS/IRC analyses |
 
 ## Usage
