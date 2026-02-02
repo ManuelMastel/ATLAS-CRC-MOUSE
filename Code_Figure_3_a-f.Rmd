@@ -1,0 +1,1219 @@
+---
+title: "Figure 3 a-f - ATLAS - Epithelial cells analysis"
+author: Manuel Mastel
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: cosmo
+    highlight: tango
+---
+
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  results = "hide",   # hide printed text, keep plots
+  fig.align = "center",
+  fig.width = 12,
+  fig.height = 7
+)
+
+```
+
+
+
+## Introduction
+
+Integrated single-cell dissection of tumor epithelial states, programs. This notebook assembles all analyses and visualizations underlying Figure 3, providing a comprehensive single-cell view of epithelial cell-state diversity, pathway activity, genotype-dependent composition, and lineage trajectories in colorectal cancer models.
+
+The figure is structured into the following analytical layers:
+
+1. **Global epithelial landscape (Fig. 3a–c)**  
+   UMAP embeddings are used to visualize:
+   - Transcriptionally defined tumor epithelial states.
+   - Histopathological stage (WT, adenoma, carcinoma).
+   - iCMS2-like versus iCMS3-like programs inferred from module score dominance.
+
+2. **Tumor state composition (Fig. 3d)**  
+   Stacked barplots quantify the relative abundance of epithelial states:
+   - Per multiplexed sample (`hash.ID`), ordered by tumor model.
+   - Pooled per tumor model (cell-weighted).
+   A consistent state ordering and color palette are enforced across all panels.
+
+3. **Compositional heterogeneity across models (Fig. 3e)**  
+   PCA of per-sample epithelial state proportions reveals genotype-driven structure in tumor ecosystem composition, visualized in PC1–PC2 space and colored by tumor model.
+
+4. **Gene-program activity across states (Fig. 3f)**  
+   A curated panel of oncogenic, developmental, inflammatory, and metabolic gene sets is scored using `AddModuleScore`.  
+   Pearson correlations between signature activity and cluster membership are computed and summarized as a bubble plot, highlighting pathway–state associations.
+
+Together, these analyses integrate cell-state annotation, functional gene-program activity, compositional remodeling, and developmental trajectories to define how distinct oncogenic genotypes and microenvironmental programs shape epithelial plasticity and tumor evolution.
+
+
+## Setup: Load packages and tumor epithelial Seurat object
+
+**Description:**  
+This section initializes the analysis environment by loading all R packages required for downstream single-cell visualization and analysis. `Seurat` is used for handling and manipulating the single-cell object, `dplyr` and `ggplot2` for data wrangling and plotting, while `SCpubr` and `Nebulosa` provide publication-quality UMAP and density visualizations.  
+
+The preprocessed tumor epithelial Seurat object is then read from disk and stored as `tumcells`. This object contains all expression data, dimensionality reductions (e.g. UMAP), and metadata (e.g. tumor states, stages, module scores) used in all subsequent Figure 3 panels.
+
+**Inputs:**
+- R packages: `Seurat`, `dplyr`, `ggplot2`, `SCpubr`, `Nebulosa`
+- Serialized Seurat object file: `tumorcells.rds`
+
+**Output:**
+- `tumcells`: Seurat object containing the tumor epithelial single-cell dataset used for all downstream analyses and visualizations.
+
+```{r}
+# Suppress package startup messages for cleaner notebook output
+suppressPackageStartupMessages({
+  library(Seurat)    # single-cell object handling and analysis
+  library(dplyr)     # data manipulation
+  library(ggplot2)   # plotting
+  library(SCpubr)    # publication-style Seurat visualizations
+  library(Nebulosa)  # kernel density feature plots on embeddings
+})
+
+# Load tumor epithelial Seurat object
+tumcells <- readRDS("tumorcells.rds")
+
+```
+
+
+## UMAP overview of tumor epithelial states, stage, and iCMS programs  
+**Figure 3a–c – Global visualization of epithelial heterogeneity and molecular subtypes**
+
+**Description:**  
+This section presents three complementary UMAP visualizations of the tumor epithelial compartment to summarize transcriptional heterogeneity, pathological progression, and molecular subtype programs:
+
+- **Panel 3a (Tumor epithelial states):**  
+  Cells are colored by curated transcriptional state annotations (`tumcells_annotation`), highlighting major epithelial programs such as WNT-modulating, crypt progenitor, basal/stress, cycling, EMT, squamous-like, neuroendocrine, and regenerative states. A fixed, publication-quality color palette (`tumor_cols`) is used to ensure consistent state identity across all downstream figures.
+
+- **Panel 3b (Tumor stage):**  
+  The same UMAP embedding is colored by histopathological stage (`tum_stage`), distinguishing normal tissue, adenoma, and carcinoma. This view links transcriptional state distributions to disease progression.
+
+- **Panel 3c (iCMS programs):**  
+  Cells are classified as *iCMS2-like* or *iCMS3-like* based on the relative dominance of the corresponding module scores (e.g., `iCMS21` vs `iCMS31`). Each cell is assigned to the program with the higher score, and the resulting binary classification is visualized on the UMAP to reveal spatial segregation and overlap of consensus molecular subtype–like programs within the epithelial compartment.
+
+Together, these panels provide a global overview of epithelial cell-state diversity, its relationship to tumor stage, and its alignment with human CRC iCMS transcriptional programs.
+
+**Inputs expected:**
+- `tumcells` Seurat object with:
+  - UMAP embedding
+  - `tumcells_annotation` (epithelial state labels)
+  - `tum_stage` (Normal tissue / Adenoma / Carcinoma)
+  - Module scores `iCMS21` and `iCMS31`
+
+**Outputs:**
+- UMAP colored by epithelial tumor states (Figure 3a)  
+- UMAP colored by tumor stage (Figure 3b)  
+- UMAP colored by iCMS2-like vs iCMS3-like assignment (Figure 3c)
+
+
+```{r}
+
+## ============================================================
+## Figure 3a – Tumor epithelial cell states on UMAP
+## ============================================================
+
+# Define color palette for curated tumor cell state annotations
+tumor_cols <- c(
+  "WNT-modulating epithelium"                   = "#E76F51",
+  "Crypt progenitor"                            = "#2A9D8F",
+  "Basal/stress epithelium"                     = "#F4A261",
+  "Cycling G2/M"                                = "#264653",
+  "Acute-phase injury epithelium"               = "#8AB17D",
+  "Squamous-like epithelium"                    = "#5C53A5",
+  "EMT epithelium"                              = "#D264B6",
+  "Metabolic absorptive epithelium"             = "#6D597A",
+  "Goblet-like epithelium"                      = "#4CC9F0",
+  "IFN-responsive epithelium"                   = "#FF6D00",
+  "Neuroendocrine epithelium"                   = "#577590",
+  "Absorptive enterocyte-like epithelium"       = "#F9C74F",
+  "Ductal-like regenerative epithelium"         = "#90BE6D",
+  "Pax2-positive ductal-metaplastic epithelium" = "#277DA1"
+)
+
+# UMAP colored by tumor epithelial state annotation
+DimPlot(
+  tumcells,
+  cols     = tumor_cols,
+  group.by = "tumcells_annotation"
+)
+
+
+## ============================================================
+## Figure 3b – Tumor stage on UMAP
+## ============================================================
+
+# Color palette for histopathological stage
+stage_cols <- c(
+  "Carcinoma"     = "#C94959",  # red
+  "Adenoma"       = "#F1C232",  # yellow
+  "Normal tissue" = "#3FA7B5"   # teal
+)
+
+# UMAP colored by tumor stage with publication-style formatting
+p_stage <- DimPlot(
+  tumcells,
+  reduction = "umap",
+  group.by  = "tum_stage",
+  pt.size   = 0.2,
+  cols      = stage_cols
+) +
+  labs(title = "Tumour stage") +
+  theme_classic(base_size = 14) +
+  theme(
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.text  = element_text(size = 14),
+    plot.title   = element_text(size = 18, face = "bold", hjust = 0.5),
+    axis.title   = element_text(size = 14),
+    axis.text    = element_blank(),
+    axis.ticks   = element_blank()
+  )
+
+p_stage
+
+
+## ============================================================
+## Figure 3c – iCMS2-like vs iCMS3-like assignment on UMAP
+## ============================================================
+
+# Assign iCMS class based on dominant module score per cell
+tumcells$iCMS_assignment <- ifelse(
+  tumcells$iCMS21 >= tumcells$iCMS31,
+  "iCMS2_like",
+  "iCMS3_like"
+)
+
+# Enforce consistent factor level ordering
+tumcells$iCMS_assignment <- factor(
+  tumcells$iCMS_assignment,
+  levels = c("iCMS2_like", "iCMS3_like")
+)
+
+# Sanity check of class distribution
+table(tumcells$iCMS_assignment)
+
+# UMAP visualization of iCMS class assignment
+DimPlot(
+  tumcells,
+  group.by = "iCMS_assignment",
+  cols     = c("steelblue", "firebrick")
+)
+
+```
+
+## Composition of tumor epithelial states across samples and tumor models  
+**Figure 3d – Stacked barplots of epithelial state proportions**
+
+**Description:**  
+This section quantifies and visualizes the relative abundance of curated tumor epithelial cell states (as defined in `tumcells_annotation`) using stacked barplots. Two complementary summaries of tumor-state composition are generated:
+
+1. **Per-sample composition (by `hash.ID`):**  
+   For each multiplexed sample, the proportion of cells belonging to each epithelial state is calculated and displayed as a stacked bar. The x-axis is ordered by `tumor_model`, allowing comparison of state composition across individual samples while retaining genotype context.
+
+2. **Per–tumor model composition (by `tumor_model`):**  
+   All cells belonging to the same tumor model are pooled, and state proportions are computed in a cell-weighted manner. The resulting stacked barplot summarizes the average epithelial-state landscape characteristic of each genetic model.
+
+In both representations, a consistent ordering of epithelial states (`annot_levels`) is enforced and a fixed color palette (`tumor_cols`) is applied. This ensures direct visual comparability of state distributions across samples, tumor models, and downstream panels (e.g., PCA in Figure 3e).
+
+**Inputs expected:**
+- `tumcells` Seurat object with:
+  - `tumcells_annotation` (epithelial state labels)
+  - `hash.ID` (sample identifier)
+  - `tumor_model` (genotype / model label)
+- `annot_levels`: ordered vector of epithelial states
+- `tumor_cols`: named color palette for epithelial states
+- `custom_order`: desired ordering of tumor models on the x-axis
+
+**Outputs:**
+- `p_hash_states`: stacked barplot of epithelial-state proportions per sample (hash.ID)  
+- `p_model_states`: stacked barplot of epithelial-state proportions per tumor model
+
+
+```{r}
+
+## ============================================================
+## Figure 3d – Proportion plots of tumor epithelial states
+## ============================================================
+
+## ============================================================
+## 0) Setup
+## ============================================================
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(tibble)
+
+## ============================================================
+## 1) Define tumor-state order (recommended)
+##    Ensures consistent ordering of stacks/legends across plots.
+## ============================================================
+annot_levels <- c(
+  "WNT-modulating epithelium",
+  "Crypt progenitor",
+  "Basal/stress epithelium",
+  "Cycling G2/M",
+  "Acute-phase injury epithelium",
+  "Squamous-like epithelium",
+  "EMT epithelium",
+  "Metabolic absorptive epithelium",
+  "Goblet-like epithelium",
+  "IFN-responsive epithelium",
+  "Neuroendocrine epithelium",
+  "Absorptive enterocyte-like epithelium",
+  "Ductal-like regenerative epithelium",
+  "Pax2-positive ductal-metaplastic epithelium"
+)
+
+# Enforce tumor_annotation factor order in meta.data
+# (creates/overwrites md$tumor_annotation from tumcells_annotation)
+md <- tumcells@meta.data
+md$tumor_annotation <- md$tumcells_annotation
+md$tumor_annotation <- factor(md$tumor_annotation, levels = annot_levels)
+tumcells@meta.data <- md
+
+## ============================================================
+## 2) Proportions PER SAMPLE (hash.ID)
+##    Calculates within-sample fractions of each tumor_state.
+## ============================================================
+df_prop_state_hash <- data.frame(
+  hash.ID     = tumcells$hash.ID,
+  tumor_state = tumcells$tumor_annotation,
+  tumor_model = tumcells$tumor_model
+) %>%
+  filter(!is.na(hash.ID), !is.na(tumor_state), !is.na(tumor_model)) %>%
+  group_by(hash.ID, tumor_model, tumor_state) %>%
+  summarise(n = n(), .groups = "drop_last") %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+# Ensure tumor_state ordering is retained in downstream plotting
+df_prop_state_hash$tumor_state <- factor(df_prop_state_hash$tumor_state, levels = annot_levels)
+
+## ============================================================
+## 3) Enforce tumor_model ordering + derive hash.ID order for x-axis
+##    Ensures samples are grouped and ordered by tumor_model.
+## ============================================================
+custom_order <- c(
+  "Colon-WT",
+  "VA","VAKP","VAKPS","VBP","VBPN","VBPNA","VBPNC","VKP","VKPN",
+  "AKP-BFP","AKPS-BFP","AKP-STAR","AKP-Arid1a-STAR","AKP-Atm-STAR",
+  "AKP-Atrx-STAR","AKP-Fbxw7-STAR","AKP-Smad4-STAR","AKPPten-STAR","AKP-Ptprt-STAR"
+)
+
+# Keep models that exist, then append any unexpected models at the end
+present_levels <- intersect(custom_order, unique(df_prop_state_hash$tumor_model))
+present_levels <- c(present_levels, setdiff(unique(df_prop_state_hash$tumor_model), present_levels))
+
+df_prop_state_hash$tumor_model <- factor(df_prop_state_hash$tumor_model, levels = present_levels)
+
+# Order hash.ID by tumor_model, then within each model alphabetically by hash.ID
+sample_order <- df_prop_state_hash %>%
+  distinct(hash.ID, tumor_model) %>%
+  arrange(tumor_model, hash.ID) %>%
+  pull(hash.ID)
+
+df_prop_state_hash$hash.ID <- factor(df_prop_state_hash$hash.ID, levels = sample_order)
+
+## ============================================================
+## 4) Stacked barplot per hash.ID (x-axis labels show tumor_model)
+## ============================================================
+
+# Tumor-state color palette (must match Figure 3a colors)
+tumor_cols <- c(
+  "WNT-modulating epithelium"                   = "#E76F51",
+  "Crypt progenitor"                            = "#2A9D8F",
+  "Basal/stress epithelium"                     = "#F4A261",
+  "Cycling G2/M"                                = "#264653",
+  "Acute-phase injury epithelium"               = "#8AB17D",
+  "Squamous-like epithelium"                    = "#5C53A5",
+  "EMT epithelium"                              = "#D264B6",
+  "Metabolic absorptive epithelium"             = "#6D597A",
+  "Goblet-like epithelium"                      = "#4CC9F0",
+  "IFN-responsive epithelium"                   = "#FF6D00",
+  "Neuroendocrine epithelium"                   = "#577590",
+  "Absorptive enterocyte-like epithelium"       = "#F9C74F",
+  "Ductal-like regenerative epithelium"         = "#90BE6D",
+  "Pax2-positive ductal-metaplastic epithelium" = "#277DA1"
+)
+
+# Map hash.ID → tumor_model for x-axis labels (labels are "encrypted strings" = model IDs)
+id_to_model <- df_prop_state_hash %>%
+  distinct(hash.ID, tumor_model) %>%
+  deframe()
+
+p_hash_states <- ggplot(df_prop_state_hash,
+                        aes(x = hash.ID, y = prop, fill = tumor_state)) +
+  geom_col(width = 0.8, color = "black", size = 0.3) +
+  scale_y_continuous(
+    breaks = c(0, 0.5, 1),
+    labels = function(x) x * 100,
+    expand = expansion(mult = c(0, 0))
+  ) +
+  scale_fill_manual(
+    values = tumor_cols,
+    breaks = annot_levels,
+    limits = annot_levels,
+    drop   = FALSE
+  ) +
+  scale_x_discrete(labels = id_to_model) +
+  labs(x = "tumor_model", y = "Tumor cell states (%)") +
+  theme_classic(base_size = 7) +
+  theme(
+    axis.text.x  = element_text(angle = 90, hjust = 1, vjust = 1),
+    legend.title = element_blank()
+  )
+
+p_hash_states
+
+
+## ============================================================
+## Figure 3d (alternate view) – Same composition summarized per tumor_model
+## ============================================================
+
+## ============================================================
+## 0) Setup
+## ============================================================
+library(Seurat)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+## ============================================================
+## 1) Define tumor-state order (recommended)
+## ============================================================
+annot_levels <- c(
+  "WNT-modulating epithelium",
+  "Crypt progenitor",
+  "Basal/stress epithelium",
+  "Cycling G2/M",
+  "Acute-phase injury epithelium",
+  "Squamous-like epithelium",
+  "EMT epithelium",
+  "Metabolic absorptive epithelium",
+  "Goblet-like epithelium",
+  "IFN-responsive epithelium",
+  "Neuroendocrine epithelium",
+  "Absorptive enterocyte-like epithelium",
+  "Ductal-like regenerative epithelium",
+  "Pax2-positive ductal-metaplastic epithelium"
+)
+
+# Re-enforce tumor_annotation factor levels (safety)
+md <- tumcells@meta.data
+md$tumor_annotation <- factor(md$tumor_annotation, levels = annot_levels)
+tumcells@meta.data <- md
+
+## ============================================================
+## 2) Enforce tumor_model ordering (your tradition)
+## ============================================================
+custom_order <- c(
+  "Colon-WT",
+  "VA","VAKP","VAKPS","VBP","VBPN","VBPNA","VBPNC","VKP","VKPN",
+  "AKP-BFP","AKPS-BFP","AKP-STAR","AKP-Arid1a-STAR","AKP-Atm-STAR",
+  "AKP-Atrx-STAR","AKP-Fbxw7-STAR","AKP-Smad4-STAR","AKPPten-STAR","AKP-Ptprt-STAR"
+)
+
+## ============================================================
+## 3) Proportions PER TUMOR MODEL (tumor_model)
+##    Cell-weighted composition pooled across all samples in a model.
+## ============================================================
+df_prop_state_model <- data.frame(
+  tumor_model = tumcells$tumor_model,
+  tumor_state = tumcells$tumor_annotation
+) %>%
+  filter(!is.na(tumor_model), !is.na(tumor_state)) %>%
+  mutate(
+    tumor_model = as.character(tumor_model),
+    tumor_state = factor(tumor_state, levels = annot_levels)
+  ) %>%
+  group_by(tumor_model, tumor_state) %>%
+  summarise(n = n(), .groups = "drop_last") %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+# Order tumor_model by custom_order, append any unexpected models at the end
+present_levels <- intersect(custom_order, unique(df_prop_state_model$tumor_model))
+present_levels <- c(present_levels, setdiff(unique(df_prop_state_model$tumor_model), present_levels))
+df_prop_state_model$tumor_model <- factor(df_prop_state_model$tumor_model, levels = present_levels)
+
+## ============================================================
+## 4) Colors for tumor states
+## ============================================================
+tumor_cols <- c(
+  "WNT-modulating epithelium"                   = "#E76F51",
+  "Crypt progenitor"                            = "#2A9D8F",
+  "Basal/stress epithelium"                     = "#F4A261",
+  "Cycling G2/M"                                = "#264653",
+  "Acute-phase injury epithelium"               = "#8AB17D",
+  "Squamous-like epithelium"                    = "#5C53A5",
+  "EMT epithelium"                              = "#D264B6",
+  "Metabolic absorptive epithelium"             = "#6D597A",
+  "Goblet-like epithelium"                      = "#4CC9F0",
+  "IFN-responsive epithelium"                   = "#FF6D00",
+  "Neuroendocrine epithelium"                   = "#577590",
+  "Absorptive enterocyte-like epithelium"       = "#F9C74F",
+  "Ductal-like regenerative epithelium"         = "#90BE6D",
+  "Pax2-positive ductal-metaplastic epithelium" = "#277DA1"
+)
+
+## ============================================================
+## 5) Stacked barplot per tumor_model
+## ============================================================
+p_model_states <- ggplot(df_prop_state_model,
+                         aes(x = tumor_model, y = prop, fill = tumor_state)) +
+  geom_col(width = 0.8, color = "black", size = 0.3) +
+  scale_y_continuous(
+    breaks = c(0, 0.5, 1),
+    labels = function(x) x * 100,
+    expand = expansion(mult = c(0, 0))
+  ) +
+  scale_fill_manual(
+    values = tumor_cols,
+    breaks = annot_levels,
+    limits = annot_levels,
+    drop   = FALSE
+  ) +
+  labs(x = "tumor_model", y = "Tumor cell states (%)") +
+  theme_classic(base_size = 7) +
+  theme(
+    axis.text.x  = element_text(angle = 90, hjust = 1, vjust = 1),
+    legend.title = element_blank()
+  )
+
+p_model_states
+
+```
+
+
+## PCA of per-sample tumor epithelial state composition  
+**Figure 3e – Principal component analysis of tumor-state proportions per sample**
+
+**Description:**  
+This section performs principal component analysis (PCA) on the composition of tumor epithelial states at the per-sample level (defined by `hash.ID`). Starting from the long-format proportion table (`df_prop_state_hash`, generated in Figure 3d), the data are reshaped into a wide matrix (samples × tumor states), where each entry represents the fraction of a given epithelial state within a sample. PCA is then computed on this composition matrix using `prcomp`.  
+Samples are visualized in the PC1–PC2 space and colored by `tumor_model`. Axis labels report the percentage of variance explained by the first two principal components, enabling interpretation of major axes of variation in epithelial-state composition across genotypes and disease stages.
+
+**Inputs expected:**
+- `df_prop_state_hash` (from Figure 3d), containing:
+  - `hash.ID` (sample identifier)  
+  - `tumor_state` (epithelial state annotation)  
+  - `prop` (within-sample proportion)  
+  - `tumor_model` (genotype / model label)
+- `custom_order` (from Figure 3d), used to enforce consistent ordering of tumor models and color assignment
+
+**Output:**
+- `p_pca_model_states` (ggplot object):  
+  A PCA scatter plot showing samples in PC1–PC2 space, colored by tumor model, summarizing global differences in epithelial-state composition across tumors.
+
+
+
+```{r}
+
+## ============================================================
+## Figure 3e – PCA on tumor-state composition per sample (hash.ID)
+## ============================================================
+
+## ============================================================
+## 5) PCA on tumor-state composition per sample
+##    - Build composition matrix (samples x tumor states)
+##    - Run PCA on per-sample state proportions
+## ============================================================
+comp_mat_state <- df_prop_state_hash %>%
+  select(hash.ID, tumor_state, prop) %>%
+  pivot_wider(
+    names_from  = tumor_state,
+    values_from = prop,
+    values_fill = 0
+  )
+
+# Convert to numeric matrix for PCA (rows = samples; cols = tumor states)
+comp_mat_state_mat <- as.matrix(comp_mat_state[, -1, drop = FALSE])
+rownames(comp_mat_state_mat) <- comp_mat_state$hash.ID
+
+# PCA on composition (no scaling; composition already on comparable scale)
+pca_state <- prcomp(comp_mat_state_mat, scale. = FALSE)
+
+# Variance explained by principal components (for axis labels)
+pcVar_state  <- summary(pca_state)
+varPC1_state <- pcVar_state$importance[2, 1]
+varPC2_state <- pcVar_state$importance[2, 2]
+
+# Extract PC1/PC2 coordinates per sample
+mat_state <- as.data.frame(pca_state$x[, 1:2, drop = FALSE])
+colnames(mat_state)[1:2] <- c("PC1", "PC2")
+mat_state$hash.ID <- rownames(mat_state)
+
+# Annotate PCA coordinates with tumor_model (one model per hash.ID)
+anno_state <- df_prop_state_hash %>%
+  distinct(hash.ID, tumor_model)
+
+mat_state <- left_join(mat_state, anno_state, by = "hash.ID")
+
+# Enforce tumor_model ordering for consistent legend ordering across figures
+present_levels_pca <- intersect(custom_order, unique(mat_state$tumor_model))
+present_levels_pca <- c(present_levels_pca, setdiff(unique(mat_state$tumor_model), present_levels_pca))
+mat_state$tumor_model <- factor(mat_state$tumor_model, levels = present_levels_pca)
+
+## ============================================================
+## 6) Color palette for models
+##    - Assign distinct colors to each tumor_model level present
+## ============================================================
+pal_models_final <- setNames(
+  c(
+    "#1F77B4", "#FF7F0E", "#2CA02C", "#D62728", "#9467BD",
+    "#8C564B", "#E377C2", "#7F7F7F", "#BCBD22", "#17BECF",
+    "#AEC7E8", "#FFBB78", "#98DF8A", "#FF9896", "#C5B0D5",
+    "#C49C94", "#F7B6D2", "#C7C7C7", "#DBDB8D", "#9EDAE5",
+    "#393B79", "#8C6D31"
+  )[seq_along(levels(mat_state$tumor_model))],
+  levels(mat_state$tumor_model)
+)
+
+## ============================================================
+## 7) PCA plot
+##    - PC1 vs PC2 colored by tumor_model
+## ============================================================
+p_pca_model_states <- ggplot(mat_state, aes(x = PC1, y = PC2, color = tumor_model)) +
+  geom_point(size = 5, alpha = 0.92) +
+  coord_equal() +
+  scale_color_manual(values = pal_models_final) +
+  xlab(sprintf("PC1 (%.1f%% variance explained)", varPC1_state * 100)) +
+  ylab(sprintf("PC2 (%.1f%% variance explained)", varPC2_state * 100)) +
+  ggtitle("PCA of samples by tumor-cell-state composition") +
+  guides(color = guide_legend(ncol = 2, override.aes = list(size = 4))) +
+  theme_classic(base_size = 10) +
+  theme(
+    plot.title       = element_text(hjust = 0.5, face = "bold"),
+    axis.title       = element_text(face = "bold"),
+    legend.title     = element_blank(),
+    legend.position  = "right"
+  )
+
+p_pca_model_states
+
+```
+
+
+
+### Correlation of gene-set activity with tumor cell clusters  
+**Figure 3f – Correlation dot plot linking gene-set activity to tumor cell clusters**
+
+**Description:**  
+This section (i) defines a curated panel of epithelial/tumor programs together with selected Hallmark and GO gene sets, (ii) computes module scores for each gene set in `tumcells` using `AddModuleScore`, (iii) calculates Pearson correlations between each signature score and cluster membership (one-vs-all binary vectors derived from `seurat_clusters`), and (iv) visualizes the resulting signature × cluster correlation matrix as a bubble (dot) plot, in which both color and size encode the correlation coefficient.  
+To reduce redundancy and improve interpretability, highly similar or overlapping signatures are collapsed using a “best cluster / best correlation” strategy, and signatures are ordered according to their maximal association with specific clusters.
+
+**Inputs expected:**
+- `tumcells` Seurat object containing:
+  - `seurat_clusters` (cluster identities)
+  - `tumcells_annotation` (cell-state labels) in `@meta.data`
+- Gene-set definitions (epithelial programs, Hallmark, and GO sets)
+- A helper function `base_name_fun()` used to collapse duplicate or closely related signatures (as referenced in the code)
+
+**Output:**
+- A signature × cluster correlation bubble plot (Figure 3f), with dot color and size proportional to the Pearson correlation coefficient.
+
+
+```{r}
+
+## ============================================================
+## Figure 3f – Correlation dot plot of gene sets vs. tumor cell-state clusters
+## ============================================================
+## Description:
+## This chunk (i) defines curated gene sets, (ii) computes per-cell module scores
+## using AddModuleScore, (iii) correlates each gene-set score with one-vs-rest
+## cluster membership, (iv) collapses duplicate/related gene sets and orders them
+## by their best-associated cluster, and (v) visualizes the correlation landscape
+## as a bubble grid (size + color encode correlation).
+##
+## Inputs expected in `tumcells@meta.data`:
+##   - seurat_clusters
+##   - tumcells_annotation
+##   - expression rownames matching gene symbols in gene sets
+##
+## Output:
+##   - p : ggplot object (bubble plot)
+## ============================================================
+
+## ============================================================
+## 0) Packages
+## ============================================================
+library(Seurat)
+library(ggplot2)
+library(scales)   # for rescale()
+
+## ============================================================
+## 0.1) Helper: collapse signature names to "base" pathway
+##      (removes trailing "_cl<number>" if present)
+## ============================================================
+base_name_fun <- function(x) gsub("_cl[0-9]+$", "", x)
+
+## ============================================================
+## 1) DEFINE GENE SETS
+##    (original signatures + selected Hallmark/GO sets)
+## ============================================================
+
+## --- original tumor programs --------------------------------
+oncofetal_genes <- c(
+  "Syt8","Vsig1","Serpinb5","Samd5","4930461G14Rik","Ly6a","Anxa1",
+  "Cdkn2a","Anxa3","S100a14","Ddah1","Ahnak","S100a6","Emp1","Bok",
+  "Ly6f","Gsn","Fmnl2","Mgat4c","Cxcl16","Pmepa1","Krt23","Rbms1",
+  "Tinagl1","Lmna","Anxa5","S100a11","Ier3","Avpi1","Krt7","Itgb4",
+  "Krt18","Cnn2","Gpx2","Emp2","Ccnd1","Ly6d","Kcnn4","Car2","Ctsh",
+  "Cd44","Fabp5","Tubb6","Col18a1","Col4a2","Timp2","Col4a1","Msln",
+  "Efemp1","1110028F11Rik","Serpinb11"
+)
+
+EpiHR_mouse <- c(
+  "Ngrn","Fbxl13","Itga3","Slc25a25","Sema4b","Mapk3","Rin1","Pnpla2",
+  "Rhod","Mid1ip1","Ddr1","Lamb3","Flrt1","Prss22","Lamc2","Hoxa4",
+  "Fam83a","Exoc7","Tnfrsf21","Ripk4","Prph","Krt19","Colec10","Spint1",
+  "Vgll1","Znf185","Gjb3","Paep","Rimbp2","Wfdc3","Gas6","Htr2c","Mroh6",
+  "Capn12","Fbxl14","Magi2","Anxa3","Ppl","Baiap2","Lingo1","Klk7","Epha2",
+  "Krt17","Scgn","Klk5","Lama3","Eps8l1","Fxyd4","Snx24","Slc22a18","Klk8",
+  "Kcnn4","Rasal1","Lemd1","Kcnk3","Rnf39","Hist2h2be","Lmo7","C1orf116",
+  "Psors1c1","Gprc5a","Sez6l2","C19orf33","Gdpd3","Klk10","Slc20a1","Klk11",
+  "Klk6","Scel","Kcnj16","Krt80","Camk2n1","Krt6a","Disp2","Slc2a1","Scnn1a",
+  "Tm4sf4","Msln","Col17a1","Fam155a","Krt6b","Pla2g10","Mybpc1","Sfta2",
+  "Slpi","Vsig2","Rhbdl2","Serpinb5","S100a2","Mmp7","Ctse","Nxf3","Gsta2",
+  "Gsta1","Clstn2","Hoxb8","Gabrp","Tacstd2","Dusp27"
+)
+
+Ki67_mouse <- c(
+  "Cdkn1b","Pif1","Ccna1","Gtse1","Cep55","Kif20b","Cenpe","Kif18a","Bub1",
+  "Cdc25b","Gjb3","Knstrn","Cdca3","Kif18b","Melk","Troap","Ddias","Ckap2",
+  "Kif20a","Mis18bp1","Ccnb2","Cdc20","Ckap2l","Ccnb1","Crym","Tpx2",
+  "Dlgap5","Bora","Nek2","Cdkn3","Aspm","Psrc1","Kif23","Pcsk6","Oscp1",
+  "Slc28a3","Nrarp","Cenpa","Alpp","Shcbp1","Arhgef39","Anln","Hmmr",
+  "Parpbp","Tlr1","Cdc25c","Ccnf","Aurka","Prc1","Cenpf","Gsdmc","Spc25",
+  "Kif2c","Kif14","Efcab11","Prr11","Kif22","Gsdmc","Plk1"
+)
+
+YAP_mouse <- c(
+  "Cyr61","Ctgf","Amotl2","Ankrd1","Igfbp3","F3","Fjx1","Nuak2","Lats2","Crim1",
+  "Gadd45a","Tgfb2","Ptpn14","Nt5e","Foxf2","Axl","Dock5","Asap1","Rbms3",
+  "Myof","Arhgef17","Ccdc80"
+)
+
+coreHRC_mouse <- c(
+  "Lamb3","Sdcbp2","Emp1","Eps8l1","Jup","Lmo7","Myof","Itgb4","Gprc5a","Ahnak",
+  "Camk2n1","Myh14","Cd55","Rhoc","Tmbim1","Sema3b","Tinagl1","Misp","Col17a1",
+  "Plec","Tspan1","Ptprh","Crb3","Itga3","Riok3","Lamc2","F2r","Rras","Muc13",
+  "Ceacam1","Tmprss2","Serinc2","Slc44a4","Pcdh1","Usp53","Flnb","Cxcl16","Ezr",
+  "Tnfrsf21","Cda","Adam9","Rnf103","Krt80","Efnb1","Smad3","Pdzkiip1","Lrp10",
+  "Prss22","Ahnak2","Anxa11","F11r","Dusp5","Ddr1","Itgb1","Slc2a1","Cdkn2b",
+  "Plaur","Itga2","Cdcp1","Cd59a","Dsg2","Klk10","Cd68","Cgn","Tm4sf1","Ppp2cb",
+  "Hebp2","Ugcg","Gbp3","Timp2","Pink1","Cystm1","Slc6a8","Ppard","Liph","Clic3",
+  "Spint1","Ptk6","Tjp3","Stk24","Ceacam5","Mxd1","Snx9","Ero1l","Ssf2","Tspan3",
+  "Slpi","Bmp2","Gjb3","Lama3","Tmprss4","B4galnt3"
+)
+
+fetal_mustata <- c(
+  "Spp1","Gja1","Basp1","Tacstd2","Sftpd","Mal","Clu","Wfdc2","Msln","Vsig1",
+  "Tubb6","Crip2","Anxa1","Col4a1","Il33","Col4a2","Krt4","Igfbp7","Akap13",
+  "Ecscr","Gkn1","Cdh13","Slc45a3","Efna5","Anxa8","Acsm3","Ppic","Anxa3",
+  "Eda2r","S100a6","Efemp1","Ddit4l","Pdzk1ip1","Ly6d","Laptm5","Plekhs1"
+)
+
+lgr5_genes_mouse <- c("Bcl11b","Axin2","Lgr5","Ascl2","Lrig1")
+
+wnt_on_genes_mouse <- c(
+  "Ascl2","Axin2","Lgr5","Kiaa1199","Sp5","Cachd1","Cst1","Smoc2","Fam216a","Lef1",
+  "Cyp4x1","Slc12a2","Dpep1","Nkd1","Lrp4","Znrf3","Ptpro","Apcdd1","Tnfrsf19",
+  "Sox2","Ptch1","Tspan5","Myrip","Cdk6","Itga9","H19","Ppp2r2c","Igfl2"
+)
+
+KRASup_mouse <- c(
+  "Abcb1a","Abcb1b","Ace","Adam17","Adam8","Adamdec1","Adgra2","Adgrl4","Akap12","Akt2"
+)
+
+## --- selected Hallmark / GO gene sets from your GSEA ----------
+GS_HALLMARK_WNT_BETA_CATENIN_SIGNALING <- c(
+  "Wnt6","Nkd1","Lef1","Gnai1","Tcf7","Axin2","Wnt5b","Hdac11",
+  "Ptch1","Csnk1e","Hdac5"
+)
+
+GS_HALLMARK_TNFA_SIGNALING_VIA_NFKB <- c(
+  "F3","Edn1","Cxcl5","Plaur","Fosl1","Cd44","Sphk1","Phlda2","Rel","Pmepa1",
+  "Tnfaip2","Tnfaip8","Tnfaip3","F2rl1","Tnf","Icam1","Clcf1","Ccn1","Plk2",
+  "Areg","Sat1","Atp2b1","Ackr3","Trib1","Lamb3","Smad3","Sdc4","Cxcl2",
+  "Hbegf","Ier3","Il23a","Pfkfb3","Tnip1","Csf1","Zc3h12a","Rela","Rcan1",
+  "Inhba","Klf6","Nfkbia","Tiparp","Ehd1","Birc3","Nfkb1","Litaf","Efna1",
+  "Nfkb2","Ifngr2","Ptger4","Relb","Dusp1","Tgif1","Bcl6","Cdkn1a","Tank",
+  "Eif1","Sqstm1","Gch1","Cxcl1","B4galt1"
+)
+
+GS_HALLMARK_INFLAMMATORY_RESPONSE <- c(
+  "F3","Edn1","Cxcl5","Plaur","Sgms2","Sphk1","Cd55","Icam1","Tnfsf10","Atp2b1",
+  "Pvr","Osmr","Slc4a4","Met","P2ry2","Hbegf","Csf1","Rela","Inhba","Klf6",
+  "Nfkbia","Nfkb1","Ifngr2","Abi1","Ptger4","Il4ra","Slc31a1","Rhog","Ahr",
+  "Cdkn1a","Gch1","Irak2"
+)
+
+GS_HALLMARK_KRAS_SIGNALING_UP <- c(
+  "Cidea","Wnt7a","Spp1","Ngf","Igfbp3","Aldh1a3","Angptl4","Cpe","Spon1",
+  "Emp1","Gprc5b","Rbp4","Ptprr","Traf1","Hdac9","Il33","Ets1","Itga2",
+  "Inhba","Plau","Plaur","Ano1","Kcnn4","Slpi","Etv4","St6gal1","Tnnt2",
+  "Laptm5","Nrp1","Dcbld2","Ank","Prkg2","Plat","Arg1","Btc","Tmem176a",
+  "Tspan7","Ammecr1","Tmem176b","Galnt3","Sox9","F2rl1"
+)
+
+GS_HALLMARK_TNFA_SIGNALING_VIA_NFKB_ALT <- c(
+  "Tnfaip2","Fjx1","Clcf1","Ccnd1","Jag1","Cd44","Sphk1","Traf1","Inhba",
+  "Plau","Plaur","Sdc4","Cxcl1","Pmepa1","Plpp3","Cebpb","Ier3","Atp2b1",
+  "Tiparp","Cxcl5","Tsc22d1","Dusp1","Il23a","Klf2","F2rl1","Fosl1","Tnfsf9",
+  "Smad3","Trip10","Areg","B4galt1","Tnfaip8","Ackr3","Vegfa","Dusp5","Hbegf",
+  "Slc16a6","Cxcl2","Litaf","Id2","Eif1","Klf6","Klf9","Sik1","Sat1"
+)
+
+GS_HALLMARK_INTERFERON_GAMMA_RESPONSE <- c(
+  "Ifit1bl1","Ifit3","Ccl7","Oas3","Ifi27l2b","Irf7","Cd38","Batf2","Ifi44",
+  "Ddx60","Sp110","Oas2","Mettl7b","Isg15","Il7","Dhx58","Oasl1","Zbp1",
+  "Ube2l6","Gbp3","Casp7","Casp1","Upp1","Rsad2","Ifih1","Rtp4","Ifit2","Mvp",
+  "Tap1","Parp12","Psmb9","Parp14","Xaf1","Psmb10","Cfb","Sri","Sppl2a",
+  "Cmpk2","Hif1a","Samd9l","Txnip","Trim25","Epsti1","Herc6","Isg20","Pde4b",
+  "Psmb8","Lgals3bp","Gch1","Trafd1","Fas","Nmi","Stat1","Tdrd7","Pla2g4a",
+  "Ifi30","Eif4e3","Tnfaip3","Znfx1","H2-D1","Plscr1","Il15ra","Pfkp","Pnp2",
+  "Rnf213","H2-Aa","Ifi35","Casp8","Cdkn1a","Stat2","Samhd1","Helz2","Il4ra",
+  "B2m","Eif2ak2","Ifi27","Bst2"
+)
+
+GS_HALLMARK_INTERFERON_ALPHA_RESPONSE <- c(
+  "Ifit3","Ifi27l2b","Irf7","Batf2","Ifi44","Ddx60","Sp110","Oas1g","Gbp2",
+  "Isg15","Il7","Oas1a","Tmem140","Dhx58","Oasl1","Ube2l6","Gbp3","Casp1",
+  "Rsad2","Ifih1","Rtp4","Ifit2","Tap1","Parp12","Psmb9","Parp14","Trim12c",
+  "Cmpk2","Samd9l","Txnip","Trim25","Epsti1","Herc6","Uba7","Isg20","Psmb8",
+  "Lgals3bp","Parp9","Trafd1","Nmi","Tdrd7","Ifi30","Plscr1","Cnp","Ifi35",
+  "Casp8","Stat2","Helz2","Il4ra","B2m","Eif2ak2","Ifi27","Bst2"
+)
+
+GS_GOBP_NEG_REG_CHEMOKINE_PRODUCTION <- c(
+  "Oas3","Nr1h4","Oas1g","Oas1a","Lgals9","Epha2","Erbin","Mul1","F2rl1"
+)
+
+GS_GOBP_NEG_REG_INNATE_IMMUNE <- c(
+  "Oas3","Oas1g","Isg15","Ceacam1","Oas1a","Arg1","Dhx58","Pparg","Nlrx1",
+  "Parp14","H2-Q2","H2-T23","Nr1h3","Trafd1","Nmi","Lgals9","Tnfaip3",
+  "H2-D1","Stat2","Samhd1","Crk","Mul1","Mill2"
+)
+
+GS_GOBP_NEG_REG_IMMUNE_RESPONSE <- c(
+  "Oas3","Cd55","Oas1g","Lgals3","Isg15","Ceacam1","Oas1a","Arg1","Dhx58",
+  "Syk","Pparg","Nlrx1","Parp14","Nlrp6","H2-Q2","Anxa1","H2-T23","Nr1h3",
+  "Trafd1","Nmi","Zbtb7b","Parp3","Lgals9","Tnfaip3","H2-D1","Zc3h12a",
+  "Stat2","Samhd1","Il4ra","Crk","Gpx1","Mul1","Mill2","H2-Eb1"
+)
+
+GS_HALLMARK_EMT <- c(
+  "Igfbp2","Lama1","Mmp2","Wnt5a","Pcolce","Fstl1","Vcan","Sparc","Pfn2",
+  "Serpinh1","Cdh11","Lgals1","Bgn","Plod2","Pthlh","Cdh2","Nid2","Emp3",
+  "Bdnf","Igfbp3","Gja1","Fermt2","Col3a1","Gas1","Thbs2","Serpine2","Mgp",
+  "Igfbp4","Col7a1","Anpep","Fbln1","Plod1","Gem","Dpysl3","P3h1","Fbln2",
+  "Efemp2","Tgfbi","Col16a1","Gpc1","Timp1","Gadd45a","Col4a1","Col4a2",
+  "Vim","Cxcl1","Sntb1","Ecm1","Ccn2","Itgb1","Tgfb1","Calu"
+)
+
+GS_HALLMARK_ANGIOGENESIS <- c(
+  "Fstl1","Thbd","Vcan","S100a4","Fgfr1","Stc1","Col3a1","Timp1"
+)
+
+GS_GOBP_NEG_REG_WNT_PATHWAY <- c(
+  "Igfbp6","Igfbp2","Wnt5a","Sox2","Nog","Nkd2","Cdh2","Apcdd1","Dact1",
+  "Gli3","Wnt11","Cited1","Wif1","Cav1","Mdk","Grb10","Bmp2","Igfbp4",
+  "Notum","Fzd1","Tpbg","Nfatc4","Ptpru","Fgf9","Dkk3","Nkd1","Kremen1",
+  "Tle1","Nxn","Wwtr1","Fzd6","Rack1","Tle2"
+)
+
+GS_GOBP_POS_REG_STEM_CELL_PROLIFERATION <- c(
+  "Gja1","Cited1","Sox11","Fermt2","Hmga2","Ltbp3","Pdcd2"
+)
+
+GS_HALLMARK_OXPHOS <- c(
+  "Maob","Acat1","Casp7","Suclg1","Mgst3","Cox10","Retsat","Echs1","Decr1",
+  "Cpt1a","Aldh6a1","Slc25a5","Ech1","Acaa2","Hadhb","Cox5a","Mpc1","Ndufb5",
+  "Cox6c","Nqo2","Uqcrfs1","Ndufa5","Cox5b","Uqcrc2","Acadm","Cox7b","Phyh",
+  "Cox6a1","Sdhc","Ndufa1","Sdhd","Atp5o","Etfa","Uqcrc1","Atp1b1","Uqcrb",
+  "Hadha","Cox4i1","Cyc1","Ndufb8","Atp5c1","Sdha","Uqcrh","Cox8a","Mdh1",
+  "Ndufa9","Atp5g1","Uqcr10","Acadvl","Aco2","Sdhb","Cox7a2","Atp5a1","Fh1",
+  "Idh3b","Ndufc1","Ndufv1","Etfb","Surf1","Slc25a12","Ndufs7","Ndufv2",
+  "Cox7c","Atp5k","Idh3g","Atp5g3","Ndufs1","Atp5l","Slc25a20","Ndufa3","Ogdh",
+  "Idh3a","Atp5d","Vdac3","Atp5h","Ndufb4","Atp5b","Prdx3","Ndufs2","Pdha1",
+  "Ndufa8","Ndufa6","Cox6b1","Cs","Ndufab1","Ndufs3","Uqcr11","Ndufs6","Ndufb6",
+  "Cox7a2l","Atp5j2","Slc25a3","Atp5j","Vdac1","Ndufb2","Atp5g2","Alas1",
+  "Slc25a11","Vdac2","Etfdh","Ndufs8","Rhot2","Eci1","Isca1","Dld","Dlat",
+  "Hsd17b10","Ndufb3","Oxa1l","Uqcrq","Ndufs4","Acaa1a","Oat","Mtrf1","Mfn2",
+  "Cycs","Ndufa7","Immt","Aifm1","Atp5e","Afg3l2","Ndufb7","Fdx1","Mdh2"
+)
+
+GS_GOBP_MAINTENANCE_GI_EPITHELIUM <- c("Muc2","Tff3","Muc4","Rbp4","Muc13")
+
+GS_GOBP_INTESTINAL_ABSORPTION <- c(
+  "Fabp1","Apoa4","Apoa1","Fabp2","Prap1","Npc1l1","Slc26a6","Mogat2","Cd36",
+  "Abcg8","Slc2a5","Abcg5","Soat2","Slc5a1","Gcnt3","Vdr","Vil1"
+)
+
+GS_GOBP_INTESTINAL_LIPID_ABSORPTION <- c(
+  "Apoa4","Apoa1","Fabp2","Prap1","Npc1l1","Cd36","Abcg8","Abcg5","Soat2"
+)
+
+GS_GOBP_REG_INTESTINAL_ABSORPTION <- c(
+  "Apoa4","Apoa1","Prap1","Abcg8","Abcg5","Lpcat3"
+)
+
+GS_GOBP_INNATE_IMMUNE_RESPONSE_MUCOSA <- c("Apoa4","Rpl39","Defa24")
+
+GS_GOBP_INNATE_IMMUNE_RESPONSE <- c(
+  "Rsad2","Ifit2","Ifit1","Ifit3","Isg15","Apol9a","Gbp3","Gbp2","Gbp4",
+  "Ddx60","Zbp1","Bst2","Oas3","Oasl1","Oas2","Dhx58","Usp18","Gbp7","Nlrc5",
+  "Cxcl10","Oas1g","Irgm1","H2-Q7","Irf7","Stat2","Sp100","Oas1a","Stat1",
+  "Ifih1","Parp14","Znfx1","Gbp9","Irgm2","Trim21","Lgals9","Dtx3l","Trim34a",
+  "Ifi35","Ifit1bl1","C2","Parp9","Lcn2","Eif2ak2","Shfl","Trim12c","Nmi",
+  "H2-Q10","Tlr3","H2-T23","Ifitm3","Cd74","Trafd1","Isg20","Adar","Cfb",
+  "H2-D1","Samhd1","Trim25","Pml","Ltf","Zc3hav1","C4bp","Adam8","Padi4",
+  "H2-M3","Grn","Cfi","Nos2","Trim56","Fes","Socs1","Trim26","Csf1","Casp4",
+  "Vav1","Lacc1","Ifi27","Arrb2","Rnf135","Cyba","Tmem106a","Lbp","Trim14",
+  "Irf1","Mif","Ifitm1","Fcer1g","Pla2g2f","Cxcl16","Tnf","C3","Tyrobp",
+  "N4bp1","Ifnar2","Map4k2","Apobec3","Igha","H2-Q2","Myc","Ikbke","Ifitm2",
+  "Tlr2","Nub1","Cd14","Unc13d","Arid5a","Gsdmd","Unc93b1"
+)
+
+GS_HALLMARK_COAGULATION <- c(
+  "Clu","Plat","Htra1","Ctse","Anxa1","Mmp7","Timp1","Pdgfb","Ctsh","F3",
+  "Prss23","Fn1","Trf","Hpn","Gda","Itga2","Hmgcs2","Lamp2","Mmp15","Csrp1",
+  "Cfi","P2ry1","Mmp14"
+)
+
+GS_HALLMARK_ANGIOGENESIS_ALT <- c(
+  "Spp1","Cxcl5","Vav2","Timp1","Pglyrp1","Itgav","Ccnd2","Tnfrsf21","S100a4"
+)
+
+GS_HALLMARK_APICAL_SURFACE <- c(
+  "Ntng1","Pkhd1","Atp6v0a4","Gstm5","Sulf2","Adam10","Crocc"
+)
+
+## ============================================================
+## 2) BUILD SIGNATURE LIST FOR AddModuleScore
+##    (names without _clXXX)
+## ============================================================
+sig_list <- list(
+  # core epithelial/tumor programs
+  WNTon        = wnt_on_genes_mouse,
+  Lgr5         = lgr5_genes_mouse,
+  coreHRC      = coreHRC_mouse,
+  Oncofetal    = oncofetal_genes,
+  FetalMustata = fetal_mustata,
+  EpiHR        = EpiHR_mouse,
+  YAP          = YAP_mouse,
+  Ki67         = Ki67_mouse,
+  KRASup       = KRASup_mouse,
+
+  # WNT / TNF / EMT / KRAS / IFN / innate / etc.
+  H_WNT_BETA    = GS_HALLMARK_WNT_BETA_CATENIN_SIGNALING,
+  H_TNFA_NFKB   = GS_HALLMARK_TNFA_SIGNALING_VIA_NFKB,
+  H_INFLAM      = GS_HALLMARK_INFLAMMATORY_RESPONSE,
+  EMT           = GS_HALLMARK_EMT,
+  KRAS_UP       = GS_HALLMARK_KRAS_SIGNALING_UP,
+  TNFA_NFKB_2   = GS_HALLMARK_TNFA_SIGNALING_VIA_NFKB_ALT,
+  ANGIO         = GS_HALLMARK_ANGIOGENESIS,
+  NEG_WNT       = GS_GOBP_NEG_REG_WNT_PATHWAY,
+  STEM_PROL     = GS_GOBP_POS_REG_STEM_CELL_PROLIFERATION,
+
+  IFNg          = GS_HALLMARK_INTERFERON_GAMMA_RESPONSE,
+  IFNa          = GS_HALLMARK_INTERFERON_ALPHA_RESPONSE,
+  NEG_CHEMOKINE = GS_GOBP_NEG_REG_CHEMOKINE_PRODUCTION,
+  NEG_INNATE    = GS_GOBP_NEG_REG_INNATE_IMMUNE,
+  NEG_IMMUNE    = GS_GOBP_NEG_REG_IMMUNE_RESPONSE,
+
+  INNATE        = GS_GOBP_INNATE_IMMUNE_RESPONSE,
+  OXPHOS        = GS_HALLMARK_OXPHOS,
+  MAINT_GI      = GS_GOBP_MAINTENANCE_GI_EPITHELIUM,
+  INT_ABS       = GS_GOBP_INTESTINAL_ABSORPTION,
+  INT_LIP_ABS   = GS_GOBP_INTESTINAL_LIPID_ABSORPTION,
+  REG_INT_ABS   = GS_GOBP_REG_INTESTINAL_ABSORPTION,
+  MUCOSA_INNATE = GS_GOBP_INNATE_IMMUNE_RESPONSE_MUCOSA,
+
+  COAG          = GS_HALLMARK_COAGULATION,
+  ANGIO_ALT     = GS_HALLMARK_ANGIOGENESIS_ALT,
+  APICAL_SURF   = GS_HALLMARK_APICAL_SURFACE
+)
+
+# Keep only genes present in the Seurat object (avoids empty/missing features)
+sig_list <- lapply(sig_list, function(gs) intersect(unique(gs), rownames(tumcells)))
+
+## ============================================================
+## 3) ADD MODULE SCORES TO tumcells
+##    Creates meta.data columns named: MS_<signature>_1
+## ============================================================
+for (nm in names(sig_list)) {
+  tumcells <- AddModuleScore(
+    tumcells,
+    features = list(sig_list[[nm]]),
+    name     = paste0("MS_", nm, "_")
+  )
+}
+
+## ============================================================
+## 4) CORRELATION: each signature vs. cluster membership
+##    - Build one-vs-rest cluster indicator matrix
+##    - Correlate indicator (0/1) with continuous module score
+## ============================================================
+meta_df <- tumcells@meta.data
+meta_df$cluster <- as.character(tumcells$seurat_clusters)
+
+# all module-score columns
+score_cols <- grep("^MS_", colnames(meta_df), value = TRUE)
+
+clusters_vec   <- meta_df$cluster
+cluster_levels <- unique(clusters_vec)
+
+# binary matrix: columns = clusters; rows = cells; 1 if cell belongs to cluster
+cluster_mat <- sapply(cluster_levels, function(cl) as.numeric(clusters_vec == cl))
+colnames(cluster_mat) <- cluster_levels
+
+# compute Pearson correlation(signature score, cluster membership)
+cor_list <- lapply(score_cols, function(col) {
+  sig_values <- meta_df[[col]]
+  cors <- apply(cluster_mat, 2, function(x) {
+    cor(x, sig_values, use = "pairwise.complete.obs")
+  })
+  data.frame(
+    score_col   = col,
+    cluster     = names(cors),
+    correlation = cors,
+    stringsAsFactors = FALSE
+  )
+})
+
+cor_df <- do.call(rbind, cor_list)
+
+# Extract clean signature name from AddModuleScore output column
+cor_df$Signature <- gsub("^MS_|_1$", "", cor_df$score_col)
+
+# Working plotting table (will be filtered/ordered below)
+plot_df <- cor_df
+
+## ============================================================
+## 5) COLLAPSE duplicate gene sets + order by best-associated cluster
+## ============================================================
+
+# Remove NAs (defensive)
+plot_df <- subset(plot_df, !is.na(Signature))
+cor_df  <- subset(cor_df,  !is.na(Signature))
+
+# Map signatures to base pathway names (for collapsing related signatures)
+plot_df$Pathway <- base_name_fun(plot_df$Signature)
+cor_df$Pathway  <- base_name_fun(cor_df$Signature)
+
+# Identify best cluster per Signature
+tmp <- cor_df
+tmp$cnum <- as.numeric(as.character(tmp$cluster))
+
+sig_stats <- do.call(
+  rbind,
+  lapply(split(tmp, tmp$Signature), function(df) {
+    if (all(is.na(df$correlation))) {
+      return(data.frame(Signature=df$Signature[1], best_cluster=Inf, best_cor=NA_real_))
+    }
+    i <- which.max(df$correlation)
+    data.frame(
+      Signature    = df$Signature[i],
+      best_cluster = df$cnum[i],
+      best_cor     = df$correlation[i]
+    )
+  })
+)
+
+sig_stats$Pathway <- base_name_fun(sig_stats$Signature)
+
+# Keep strongest Signature per Pathway
+keep_sig <- unlist(
+  lapply(split(sig_stats, sig_stats$Pathway), function(df) {
+    df$Signature[which.max(df$best_cor)]
+  })
+)
+
+plot_df <- subset(plot_df, Signature %in% keep_sig)
+cor_df  <- subset(cor_df,  Signature %in% keep_sig)
+
+# Collapse names to base pathway (after filtering)
+plot_df$Signature <- base_name_fun(plot_df$Signature)
+cor_df$Signature  <- base_name_fun(cor_df$Signature)
+
+# Recompute best cluster per Pathway (for x-axis ordering)
+tmp2 <- cor_df
+tmp2$cnum <- as.numeric(as.character(tmp2$cluster))
+
+path_stats <- do.call(
+  rbind,
+  lapply(split(tmp2, tmp2$Signature), function(df) {
+    if (all(is.na(df$correlation))) {
+      return(data.frame(Signature=df$Signature[1], best_cluster=Inf, best_cor=NA_real_))
+    }
+    i <- which.max(df$correlation)
+    data.frame(
+      Signature    = df$Signature[i],
+      best_cluster = df$cnum[i],
+      best_cor     = df$correlation[i]
+    )
+  })
+)
+
+path_stats <- path_stats[order(path_stats$best_cluster, -path_stats$best_cor), ]
+sig_order  <- path_stats$Signature
+sig_order  <- sig_order[sig_order %in% plot_df$Signature]
+
+plot_df$Signature <- factor(plot_df$Signature, levels = sig_order)
+
+## ============================================================
+## 6) CLUSTER LABELS FROM tumcells$tumcells_annotation (0 at top)
+## ============================================================
+meta_all <- tumcells@meta.data
+
+# Map numeric seurat cluster IDs to biological state labels
+cl_map <- unique(meta_all[, c("seurat_clusters", "tumcells_annotation")])
+cl_map <- cl_map[!is.na(cl_map$tumcells_annotation), ]
+cl_map$seurat_clusters <- as.character(cl_map$seurat_clusters)
+
+cl_num <- sort(unique(as.numeric(cl_map$seurat_clusters)))
+cluster_levels <- rev(as.character(cl_num))   # 0 on top
+
+lab_vec <- cl_map$tumcells_annotation[
+  match(as.character(cl_num), cl_map$seurat_clusters)
+]
+names(lab_vec) <- as.character(cl_num)
+
+# Apply cluster order and create label vector in plotting order
+plot_df$cluster <- factor(as.character(plot_df$cluster), levels = cluster_levels)
+cluster_labels <- lab_vec[levels(plot_df$cluster)]
+
+## ============================================================
+## 7) NICE NAMES FOR GENE SETS (x-axis labels)
+## ============================================================
+nice_names <- c(
+  WNTon         = "WNT-on stemness",
+  Lgr5          = "Lgr5+ stem cells",
+  coreHRC       = "core HRC program",
+  Oncofetal     = "Oncofetal",
+  FetalMustata  = "Fetal epithelium",
+  EpiHR         = "Epi-HR",
+  YAP           = "YAP/TAZ targets",
+  Ki67          = "Proliferation",
+  KRASup        = "KRAS-up",
+  H_WNT_BETA    = "Hallmark WNT/β-cat.",
+  EMT           = "EMT",
+  H_TNFA_NFKB   = "TNFα–NF-κB",
+  H_INFLAM      = "Inflamm. response",
+  NEG_WNT       = "Negative WNT reg.",
+  STEM_PROL     = "Stem cell prolifer.",
+  IFNg          = "IFN-γ response",
+  IFNa          = "IFN-α response",
+  INNATE        = "Innate immune resp.",
+  NEG_CHEMOKINE = "Neg. chemokine reg.",
+  NEG_INNATE    = "Neg. innate reg.",
+  NEG_IMMUNE    = "Neg. immune reg.",
+  OXPHOS        = "Oxidative phosph.",
+  MAINT_GI      = "GI epithelium maint.",
+  INT_ABS       = "Intestinal absorp.",
+  INT_LIP_ABS   = "Lipid absorption",
+  REG_INT_ABS   = "Reg. intestinal abs.",
+  REG_INT_LIP_ABS = "Reg. lipid abs.",
+  INNATE_MUCOSA8  = "Innate mucosa (Paneth)",
+  INNATE_MUCOSA11 = "Innate mucosa (Apoa4)",
+  COAG          = "Coagulation",
+  ANGIO         = "Angiogenesis",
+  APICAL_SURF   = "Apical surface"
+)
+
+x_levels <- levels(plot_df$Signature)
+x_labs   <- setNames(x_levels, x_levels)
+x_labs[names(nice_names)] <- nice_names[names(nice_names) %in% x_levels]
+
+## ============================================================
+## 8) GRID DATA FOR geom_tile (background squares)
+## ============================================================
+grid_df <- expand.grid(
+  Signature = levels(plot_df$Signature),
+  cluster   = levels(plot_df$cluster)
+)
+
+## ============================================================
+## 9) FINAL GRID BUBBLE PLOT
+## ============================================================
+p <- ggplot() +
+  # square grid background
+  geom_tile(
+    data = grid_df,
+    aes(x = Signature, y = cluster),
+    color     = "grey85",
+    fill      = NA,
+    linewidth = 0.4
+  ) +
+  # bubbles encode correlation magnitude and sign
+  geom_point(
+    data  = plot_df,
+    aes(
+      x    = Signature,
+      y    = cluster,
+      size = correlation,
+      fill = correlation
+    ),
+    shape  = 21,
+    stroke = 0.8,
+    color  = "black"
+  ) +
+  # blue → white → red correlation gradient
+  scale_fill_gradientn(
+    colours = c(
+      "#2166AC",  # dark blue
+      "#67A9CF",  # light blue
+      "#F7F7F7",  # white
+      "#D64545",  # light red/orange
+      "darkred"   # strong red
+    ),
+    values = rescale(c(-1, -0.5, 0, 0.5, 1)),
+    limits = c(-1, 1),
+    breaks = c(-1, 0, 1),
+    labels = c("-1", "0", "1"),
+    name   = "Pearson correlation"
+  ) +
+  scale_size(range = c(1, 5), name = "Correlation") +
+  scale_y_discrete(labels = cluster_labels) +
+  scale_x_discrete(labels = x_labs) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.background = element_blank(),
+    panel.grid       = element_blank(),
+    axis.text.x      = element_text(angle = 60, hjust = 1, size = 8),
+    axis.text.y      = element_text(size = 8),
+    axis.title.x     = element_blank(),
+    axis.title.y     = element_text(size = 8, face = "bold"),
+    plot.title       = element_text(hjust = 0.5, size = 10, face = "bold"),
+    legend.text      = element_text(size = 8),
+    legend.title     = element_text(size = 10, face = "bold")
+  ) +
+  labs(
+    title = "Signature × tumor cell state landscape\n(correlation-based score)",
+    y     = "Tumor cell state"
+  )
+
+print(p)
+
+
+```
+
+
+
+## Concluding note
+
+This notebook provides the complete, fully reproducible analytical workflow underlying Figure 3, from raw single-cell state annotation and pathway scoring to compositional analysis and lineage reconstruction. All steps are performed directly on the annotated tumor epithelial Seurat object, with consistent color schemes, state ordering, and model hierarchies enforced across panels to ensure interpretability and cross-panel comparability. The combined visualization of discrete cell states, continuous gene-program activity, and Slingshot-inferred trajectories establishes a coherent framework to relate genotype, transcriptional plasticity, and developmental progression within the tumor epithelium. This framework can be readily extended to additional gene programs, perturbations, or datasets, and serves as a reference pipeline for state-resolved, trajectory-aware analysis of epithelial tumor ecosystems.
+
+
