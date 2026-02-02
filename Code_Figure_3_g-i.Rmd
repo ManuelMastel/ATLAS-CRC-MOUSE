@@ -1,0 +1,940 @@
+---
+title: "Figure 3 g-i - ATLAS - Epithelial cells analysis"
+author: Manuel Mastel
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: true
+    code_folding: show
+    theme: cosmo
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  results = "hide",   # hide printed text, keep plots
+  fig.align = "center",
+  fig.width = 12,
+  fig.height = 7
+)
+
+```
+
+## Introduction
+This notebook reproduces the analyses underlying Figure 3g–i, focusing on epithelial tumor cell states within the ATLAS single-cell framework. Using module score–based density mapping and trajectory inference, it dissects how oncogenic signaling, inflammatory responses, and developmental programs are spatially organized across the epithelial UMAP. Nebulosa-style density plots are employed to sensitively visualize pathway activities, while Slingshot-based pseudotime analysis captures continuous differentiation and malignant progression trajectories. Multiple lineage branches are resolved, reflecting proliferative, fetal-like, EMT-associated, and immune-regulatory epithelial programs. Together, these analyses provide a coherent view of epithelial plasticity as a function of tumor stage and transcriptional state.
+
+## Setup: Load packages and tumor epithelial Seurat object
+
+### Setup: Load packages and tumor epithelial Seurat object
+
+**Description:**  
+This section initializes the analysis environment by loading all R packages required for downstream single-cell visualization and analysis. `Seurat` is used for handling and manipulating the single-cell object, `dplyr` and `ggplot2` for data wrangling and plotting, while `SCpubr` and `Nebulosa` provide publication-quality UMAP and density visualizations.  
+
+The preprocessed tumor epithelial Seurat object is then read from disk and stored as `tumcells`. This object contains all expression data, dimensionality reductions (e.g. UMAP), and metadata (e.g. tumor states, stages, module scores) used in all subsequent Figure 3 panels.
+
+1. **Spatial distribution of pathway programs (Fig. 3g)**  
+   Nebulosa density maps of gamma-boosted module scores (e.g. WNT-on, IFN-γ, coreHRC, fetal, KRAS, YAP) visualize continuous gradients of pathway activity across the epithelial manifold.
+
+2. **Developmental and malignant trajectories (Fig. 3h)**  
+   Slingshot-based pseudotime analyses reconstruct multiple lineage trajectories from normal epithelium toward distinct malignant endpoints, including:
+   - EMT-like programs.
+   - Fetal / regenerative states.
+   - Proliferative programs.
+   - Immune-regulatory (IRC-like) states.  
+   For each lineage, UMAPs are colored by pseudotime and overlaid with centerline curves to illustrate directional progression.
+
+**Inputs:**
+- R packages: `Seurat`, `dplyr`, `ggplot2`, `SCpubr`, `Nebulosa`
+- Serialized Seurat object file: `tumorcells.rds`
+
+**Output:**
+- `tumcells`: Seurat object containing the tumor epithelial single-cell dataset used for all downstream analyses and visualizations.
+
+```{r}
+
+# Suppress package startup messages for cleaner notebook output
+suppressPackageStartupMessages({
+  library(Seurat)    # single-cell object handling and analysis
+  library(dplyr)     # data manipulation
+  library(ggplot2)   # plotting
+  library(SCpubr)    # publication-style Seurat visualizations
+  library(Nebulosa)
+  library(scales)   # for rescale()
+# kernel density feature plots on embeddings
+})
+
+# Load tumor epithelial Seurat object
+tumcells <- readRDS("tumorcells.rds")
+
+```
+
+## Density plots (boosted module scores on UMAP)  
+**Figure 3g – Density maps of boosted module scores on the tumor epithelial UMAP**
+
+**Description:**  
+This section generates Nebulosa-style density maps for selected module scores (e.g., WNT-on, IFNγ, coreHRC, FetalMustata, KRAS_UP, YAP) on the `tumcells` UMAP embedding. To improve visual contrast, each module score is transformed using a gamma-boost procedure that: (i) truncates negative/background values, (ii) rescales the remaining positive signal to the range [0, 1], and (iii) applies a gamma transformation (gamma < 1 enhances weaker signal; gamma closer to 1 is milder). Each boosted score is then visualized using `plot_density()` with a custom “fiery” gradient.
+
+**Inputs expected:**
+- `tumcells`: Seurat object containing a `umap` reduction  
+- Module score columns in `tumcells@meta.data`:
+  - `MS_WNTon_1`, `MS_IFNg_1`, `MS_coreHRC_1`, `MS_FetalMustata_1`, `MS_KRAS_UP_1`, `MS_YAP_1`
+- `plot_density()` available in the session (Nebulosa/scCustomize-style)
+
+**Outputs:**
+- A series of density plots (one per boosted module score), intended for Figure 3g panels.
+
+```{r}
+
+## ============================================================
+## Figure 3g – Density plots of boosted module scores (Nebulosa)
+## ============================================================
+
+## ============================================================
+## 0) Color palette (fiery gradient)
+## ============================================================
+fiery_pal <- c(
+  "grey85",
+  "#D9D9D9",  # light grey
+  "#E87373",  # mid pastel red
+  "#D64545",  # strong red
+  "#8B0000"   # deep dark red
+)
+
+## ============================================================
+## 1) Boost function for module scores (visualization only)
+##    - truncates negatives (background)
+##    - rescales positive signal to [0, 1]
+##    - gamma transform (gamma < 1 boosts low values)
+## ============================================================
+boost_module_score <- function(obj, col, new_name, gamma = 0.5) {
+  s <- obj@meta.data[[col]]
+
+  # 1) Remove negatives (background) and keep only positive signal
+  s_pos <- pmax(s, 0)
+
+  # 2) Rescale positives to [0, 1]
+  s01 <- rescale(s_pos, to = c(0, 1), na.rm = TRUE)
+
+  # 3) Gamma transform: gamma < 1 boosts low values
+  s_boost <- s01^gamma
+
+  obj[[new_name]] <- s_boost
+  obj
+}
+
+## ============================================================
+## 2) WNT-on density (boosted)
+## ============================================================
+gamma_val <- 0.4   # tweak: 0.3 = very sensitive, 0.7 = milder
+tumcells <- boost_module_score(tumcells, "MS_WNTon_1", "MS_WNTon_1_boost", gamma = gamma_val)
+
+plot_density(
+  tumcells,
+  features = "MS_WNTon_1_boost"
+) +
+  scale_color_gradientn(colours = fiery_pal) +   # overwrite Nebulosa default
+  theme_classic()
+
+## ============================================================
+## 3) IFN-γ density (boosted)
+## ============================================================
+gamma_val <- 0.4
+tumcells <- boost_module_score(tumcells, "MS_IFNg_1", "MS_IFNg_1_boost", gamma = gamma_val)
+
+plot_density(
+  tumcells,
+  features = "MS_IFNg_1_boost"
+) +
+  scale_color_gradientn(colours = fiery_pal) +
+  theme_classic()
+
+## ============================================================
+## 4) coreHRC density (boosted)
+## ============================================================
+gamma_val <- 0.9   # milder boosting
+tumcells <- boost_module_score(tumcells, "MS_coreHRC_1", "MS_coreHRC_1_boost", gamma = gamma_val)
+
+plot_density(
+  tumcells,
+  features = "MS_coreHRC_1_boost"
+) +
+  scale_color_gradientn(colours = fiery_pal) +
+  theme_classic()
+
+## ============================================================
+## 5) FetalMustata density (boosted)
+## ============================================================
+gamma_val <- 0.9
+tumcells <- boost_module_score(tumcells, "MS_FetalMustata_1", "MS_FetalMustata_1_boost", gamma = gamma_val)
+
+plot_density(
+  tumcells,
+  features = "MS_FetalMustata_1_boost"
+) +
+  scale_color_gradientn(colours = fiery_pal) +
+  theme_classic()
+
+## ============================================================
+## 6) KRAS_UP density (boosted)
+## ============================================================
+gamma_val <- 0.05  # very strong boosting (high sensitivity)
+tumcells <- boost_module_score(tumcells, "MS_KRAS_UP_1", "MS_KRAS_UP_1_boost", gamma = gamma_val)
+
+plot_density(
+  tumcells,
+  features = "MS_KRAS_UP_1_boost"
+) +
+  scale_color_gradientn(colours = fiery_pal) +
+  theme_classic()
+
+## ============================================================
+## 7) YAP density (boosted)
+## ============================================================
+gamma_val <- 0.9
+tumcells <- boost_module_score(tumcells, "MS_YAP_1", "MS_YAP_1_boost", gamma = gamma_val)
+
+plot_density(
+  tumcells,
+  features = "MS_YAP_1_boost"
+) +
+  scale_color_gradientn(colours = fiery_pal) +
+  theme_classic()
+
+
+```
+
+
+
+## Pseudotime analysis – Global setup and trajectory inference
+
+**Description:**  
+This section defines tumor stage annotations (WT, Adenoma, Carcinoma) based on genotype, subsets epithelial tumor cell states of interest, and performs trajectory inference using Slingshot on a Harmony embedding. The resulting SingleCellExperiment object (`sce`) contains multiple lineages representing alternative differentiation and malignant progression routes. The first lineage pseudotime (`slingPseudotime_1`) is stored in the Seurat object as a global progression axis from normal crypt-like states towards malignant epithelial programs.
+
+**Inputs expected:**
+- `tumcells`: Seurat object with Harmony, UMAP, and clustering already computed  
+- `tumor_model`, `tumcells_annotation`, `seurat_clusters` in metadata  
+
+**Outputs:**
+- `tum_sub`: epithelial subset with stage labels  
+- `sce`: SingleCellExperiment with Slingshot trajectories  
+- `tum_sub$pseudotime1`: global pseudotime (lineage 1)  
+
+
+```{r}
+
+## ============================================================
+## 0) Packages
+## ============================================================
+library(Seurat)
+library(SingleCellExperiment)
+library(slingshot)
+library(dplyr)
+library(ggplot2)
+library(DelayedMatrixStats)
+
+## ============================================================
+## 1) Define stage per tumor_model (WT / Adenoma / Carcinoma)
+## ============================================================
+# Adapt these mappings to your real model annotations
+wt_models <- c("Colon-WT")
+adenoma_models <- c("VA")            # example: adenoma-like
+carcinoma_models <- c(
+  "VBP","VBPN","VBPNA","VBPNC","VKP","VKPN",
+  "AKP-BFP","AKPS-BFP","AKP-STAR","AKP-Arid1a-STAR",
+  "AKP-Atm-STAR","AKP-Atrx-STAR","AKP-Fbxw7-STAR",
+  "AKP-Smad4-STAR","AKPPten-STAR","AKP-Ptprt-STAR", "VAKP", "VAKPS"
+)
+
+md <- tumcells@meta.data
+
+md$stage <- NA_character_
+md$stage[md$tumor_model %in% wt_models]       <- "WT"
+md$stage[md$tumor_model %in% adenoma_models]  <- "Adenoma"
+md$stage[md$tumor_model %in% carcinoma_models]<- "Carcinoma"
+
+md$stage <- factor(md$stage, levels = c("WT","Adenoma","Carcinoma"))
+tumcells@meta.data <- md
+
+table(tumcells$stage, useNA = "ifany")
+
+
+## ============================================================
+## 2) Subset to the models + epithelial states you care about
+## ============================================================
+# Here we keep all epithelial tumor states, drop NA stage
+epi_keep <- c(
+  "WNT-modulating epithelium",
+  "Crypt progenitor",
+  "Basal/stress epithelium",
+  "Cycling G2/M",
+  "Immune regulatory epithelium",
+  "Squamous-like epithelium",
+  "EMT epithelium",
+  "Metabolic absorptive epithelium",
+  "Goblet-like epithelium",
+  "IFN-responsive epithelium",
+  "Neuroendocrine epithelium",
+  "Absorptive enterocyte-like epithelium",
+  "Ductal-like regenerative epithelium",
+  "Ductal-metaplastic epithelium"
+)
+
+tum_sub <- subset(
+  tumcells,
+  subset = !is.na(stage) & tumcells_annotation %in% epi_keep
+)
+
+table(tum_sub$stage)
+
+
+## ============================================================
+## 3) Use an embedding for trajectory (e.g. Harmony or PCA)
+## ============================================================
+# Make sure you have run Harmony / PCA on tum_sub if needed:
+# tum_sub <- ScaleData(tum_sub)
+# tum_sub <- RunPCA(tum_sub, npcs = 30, verbose = FALSE)
+# tum_sub <- RunHarmony(tum_sub, group.by.vars = "run", dims.use = 1:30)
+# tum_sub <- RunUMAP(tum_sub, reduction = "harmony", dims = 1:30)
+
+# We'll use a low-dimensional representation: here 'harmony'
+emb <- Embeddings(tum_sub, reduction = "harmony")[, 1:20]  # or "pca"
+
+## ============================================================
+## 4) Convert to SingleCellExperiment for slingshot
+## ============================================================
+sce <- as.SingleCellExperiment(tum_sub)
+# store embedding as a reducedDim
+SingleCellExperiment::reducedDim(sce, "HARMONY") <- emb
+
+# Use a clustering to define nodes – here your tumor_annotation or seurat_clusters
+cluster_labels <- tum_sub$seurat_clusters    # or tum_sub$tumor_annotation
+
+## ============================================================
+## 5) Run Slingshot with Colon-WT-like cluster as root
+## ============================================================
+# Find cluster(s) enriched for WT as starting point (rough heuristic)
+table(cluster_labels, tum_sub$stage)
+
+# Choose a clear WT-enriched cluster as root, e.g. "11" (absorptive) or "1" (crypt),
+# adapt this based on the table above:
+start_cluster <- "7"  # <-- CHANGE to your WT-enriched cluster ID
+
+sce <- slingshot(
+  sce,
+  clusterLabels = cluster_labels,
+  reducedDim    = "HARMONY",
+  start.clus    = start_cluster
+)
+
+# Pseudotime (first lineage; if multiple lineages exist, choose @slingPseudotime_1)
+pt <- sce$slingPseudotime_1
+tum_sub$pseudotime <- pt
+
+
+# Optional sanity check: plot all lineages in order to know the lineage numbers for the upcoming analysis
+
+## ============================================================
+## 6) Store ALL slingshot pseudotimes (Lineage 1–6) in Seurat meta.data
+## ============================================================
+
+# Sanity: make sure these exist
+stopifnot(inherits(sce, "SingleCellExperiment"))
+stopifnot(all(colnames(tum_sub) %in% colnames(sce)))  # usually TRUE; order may differ
+
+# Ensure same cell order between sce and tum_sub before adding vectors
+sce <- sce[, colnames(tum_sub)]
+
+# Add lineage-wise pseudotime columns to tum_sub
+for (i in 1:7) {
+  nm <- paste0("slingPseudotime_", i)
+  if (!nm %in% colnames(colData(sce))) {
+    stop(paste("Missing", nm, "in colData(sce). Available:", paste(colnames(colData(sce)), collapse = ", ")))
+  }
+  tum_sub[[paste0("pseudotime_L", i)]] <- colData(sce)[[nm]]
+}
+
+# Quick check
+summary(tum_sub$pseudotime_L1)
+table(is.na(tum_sub$pseudotime_L1))
+
+## ============================================================
+## 7B) Plot ALL lineages (L1–L7) as a panel grid
+## ============================================================
+
+library(patchwork)
+
+plots <- lapply(1:7, function(i) {
+  FeaturePlot(
+    tum_sub,
+    features  = paste0("pseudotime_L", i),
+    reduction = "umap",
+    pt.size   = 0.15,
+    order     = TRUE
+  ) +
+    ggtitle(paste0("Lineage ", i)) +
+    theme_classic()
+})
+
+#wrap_plots(plots, ncol = 3)
+
+
+
+```
+
+### Pseudotime to EMT cluster  
+**Figure 3 – Lineage 3 (EMT / MAPK-high branch)**
+
+**Description:**  
+This section visualizes the Slingshot lineage corresponding to epithelial–mesenchymal transition (EMT) and MAPK-high tumor cell states, using `sce$slingPseudotime_3`. Pseudotime values are projected onto the UMAP embedding, and the associated lineage curve is extracted. A smoothed pseudotime centerline is computed by binning cells along pseudotime and averaging their UMAP coordinates, providing a geometric representation of the EMT trajectory.
+
+**Inputs expected:**
+- `sce`: Slingshot object with Harmony-based trajectories  
+- `tum_sub`: Seurat object with UMAP, stage, and tumor_model  
+- `cluster_labels`, `start_cluster`  
+
+**Outputs:**
+- `p_umap_pt3_centerline`: UMAP colored by EMT pseudotime with trajectory centerline  
+
+
+```{r}
+
+#### pseudotime to EMT cluster Figure 3 H - part 1
+
+## ============================================================
+## LINEAGE 3 – UMAP with sce$slingPseudotime_3 + matching curve
+## ============================================================
+
+library(SingleCellExperiment)
+library(slingshot)
+library(dplyr)
+library(ggplot2)
+library(scales)  # cut_number
+
+## ------------------------------------------------------------
+## 0) Align SCE to tum_sub cell order (IMPORTANT)
+## ------------------------------------------------------------
+sce <- sce[, colnames(tum_sub)]
+
+## 1) Add pseudotime_3 to Seurat + build UMAP df ----------------
+
+pt3 <- sce$slingPseudotime_3
+tum_sub$pseudotime3 <- pt3
+
+umap_df3 <- as.data.frame(Embeddings(tum_sub, "umap"))
+colnames(umap_df3)[1:2] <- c("umap_1", "umap_2")
+umap_df3$pseudotime3 <- tum_sub$pseudotime3
+umap_df3$stage       <- tum_sub$stage
+umap_df3$tumor_model <- tum_sub$tumor_model
+
+## 2) Slingshot on UMAP (to obtain curves) ----------------------
+##    NOTE: only required if you need the curve geometry. If you only
+##    want to color by pseudotime_3, you can skip this whole section.
+
+sce_umap <- sce
+SingleCellExperiment::reducedDim(sce_umap, "UMAP") <- Embeddings(tum_sub, "umap")[, 1:2]
+
+sce_umap <- slingshot(
+  sce_umap,
+  clusterLabels = cluster_labels,
+  reducedDim    = "UMAP",
+  start.clus    = start_cluster
+)
+
+## 3) Select the curve that corresponds best to pseudotime_3 -----
+
+pt_mat <- as.matrix(slingshot::slingPseudotime(sce_umap))  # cells x lineages
+pt_ref <- pt3
+
+cors <- apply(pt_mat, 2, function(x) {
+  ok <- !is.na(x) & !is.na(pt_ref)
+  if (sum(ok) < 20) return(NA_real_)
+  suppressWarnings(cor(x[ok], pt_ref[ok], method = "spearman"))
+})
+
+best_idx <- which.max(cors)
+if (length(best_idx) == 0 || is.infinite(best_idx) || is.na(cors[best_idx])) {
+  stop("Could not match slingPseudotime_3 to a lineage curve (all correlations NA).")
+}
+message(
+  "Matched pseudotime_3 to lineage column index: ", best_idx,
+  " (Spearman rho = ", signif(cors[best_idx], 3), ")."
+)
+
+curve_list <- slingCurves(sce_umap)
+crv3 <- curve_list[[best_idx]]
+
+curve3_df <- as.data.frame(crv3$s)
+colnames(curve3_df) <- c("umap_1", "umap_2")
+
+## 4) Centerline from pseudotime_3 bins --------------------------
+
+pt_vals3  <- umap_df3$pseudotime3[!is.na(umap_df3$pseudotime3)]
+n_unique3 <- length(unique(pt_vals3))
+
+max_bins <- 20
+min_bins <- 10
+
+# Guardrails (avoid n_bins > n_unique-1 or too small)
+if (n_unique3 < 3) stop("Too few non-NA pseudotime_3 values to build centerline.")
+n_bins3 <- min(max_bins, n_unique3 - 1)
+n_bins3 <- max(n_bins3, min_bins)
+n_bins3 <- min(n_bins3, n_unique3 - 1)
+
+cat("Using", n_bins3, "bins for pseudotime_3 centerline.\n")
+
+line3_df <- umap_df3 %>%
+  filter(!is.na(pseudotime3)) %>%
+  arrange(pseudotime3) %>%
+  mutate(bin = cut_number(pseudotime3, n = n_bins3)) %>%
+  group_by(bin) %>%
+  summarise(
+    umap_1   = mean(umap_1, na.rm = TRUE),
+    umap_2   = mean(umap_2, na.rm = TRUE),
+    pt_mean3 = mean(pseudotime3, na.rm = TRUE),
+    .groups  = "drop"
+  ) %>%
+  arrange(pt_mean3)
+
+## 5) Plot: UMAP colored by pseudotime_3 + centerline (+ curve) --
+
+p_umap_pt3_centerline <- ggplot() +
+  geom_point(
+    data = umap_df3,
+    aes(x = umap_1, y = umap_2, color = pseudotime3),
+    size = 0.4, alpha = 0.8
+  ) +
+  geom_path(
+    data = line3_df,
+    aes(x = umap_1, y = umap_2),
+    color = "black", size = 1.2, lineend = "round"
+  ) +
+  scale_color_viridis_c(option = "plasma", na.value = "grey80") +
+  theme_classic() +
+  ggtitle("Tumor epithelium – pseudotime 3 centerline (UMAP)")
+
+p_umap_pt3_centerline
+
+
+```
+
+
+### Pseudotime to fetal-like cluster  
+**Figure 3 – (Fetal / regenerative branch)**
+
+**Description:**  
+This section focuses on the lineage capturing transition towards fetal-like and regenerative epithelial programs. The corresponding Slingshot curve is identified by correlating all lineage pseudotime vectors with the distinct pseudotime. Cells are colored by pseudotime on the UMAP, and a pseudotime-binned centerline is computed to summarize the fetal-like differentiation trajectory.
+
+**Inputs expected:**
+- `sce_umap`: Slingshot object with UMAP and lineage curves  
+- `tum_sub`: Seurat object with UMAP, stage, and tumor_model  
+- Distinct pseudotime 
+
+**Outputs:**
+- Pseudotime centerline: UMAP colored by fetal-like pseudotime with centerline  
+
+```{r}
+
+#### pseudotime to fetal cluster Figure 3 H
+
+## ============================================================
+## LINEAGE 5 – UMAP with sce$slingPseudotime_5 + matching curve
+## ============================================================
+
+library(SingleCellExperiment)
+library(slingshot)
+library(dplyr)
+library(ggplot2)
+library(scales)  # cut_number
+
+## ------------------------------------------------------------
+## 0) Align SCE to tum_sub cell order (IMPORTANT)
+## ------------------------------------------------------------
+sce <- sce[, colnames(tum_sub)]
+
+## 1) Add pseudotime_5 to Seurat + build UMAP df ----------------
+
+pt5 <- sce$slingPseudotime_5
+tum_sub$pseudotime5 <- pt5
+
+umap_df5 <- as.data.frame(Embeddings(tum_sub, "umap"))
+colnames(umap_df5)[1:2] <- c("umap_1", "umap_2")
+umap_df5$pseudotime5 <- tum_sub$pseudotime5
+umap_df5$stage       <- tum_sub$stage
+umap_df5$tumor_model <- tum_sub$tumor_model
+
+## 2) Slingshot on UMAP (to obtain curves) ----------------------
+##    NOTE: only required if you need the curve geometry. If you only
+##    want to color by pseudotime_5, you can skip this whole section.
+
+sce_umap <- sce
+SingleCellExperiment::reducedDim(sce_umap, "UMAP") <- Embeddings(tum_sub, "umap")[, 1:2]
+
+sce_umap <- slingshot(
+  sce_umap,
+  clusterLabels = cluster_labels,
+  reducedDim    = "UMAP",
+  start.clus    = start_cluster
+)
+
+## 3) Select the curve that corresponds best to pseudotime_5 -----
+
+pt_mat <- as.matrix(slingshot::slingPseudotime(sce_umap))  # cells x lineages
+pt_ref <- pt5
+
+cors <- apply(pt_mat, 2, function(x) {
+  ok <- !is.na(x) & !is.na(pt_ref)
+  if (sum(ok) < 20) return(NA_real_)
+  suppressWarnings(cor(x[ok], pt_ref[ok], method = "spearman"))
+})
+
+best_idx <- which.max(cors)
+if (length(best_idx) == 0 || is.infinite(best_idx) || is.na(cors[best_idx])) {
+  stop("Could not match slingPseudotime_5 to a lineage curve (all correlations NA).")
+}
+message(
+  "Matched pseudotime_5 to lineage column index: ", best_idx,
+  " (Spearman rho = ", signif(cors[best_idx], 3), ")."
+)
+
+curve_list <- slingCurves(sce_umap)
+crv5 <- curve_list[[best_idx]]
+
+curve5_df <- as.data.frame(crv5$s)
+colnames(curve5_df) <- c("umap_1", "umap_2")
+
+## 4) Centerline from pseudotime_5 bins --------------------------
+
+pt_vals5  <- umap_df5$pseudotime5[!is.na(umap_df5$pseudotime5)]
+n_unique5 <- length(unique(pt_vals5))
+
+max_bins <- 20
+min_bins <- 10
+
+# Guardrails (avoid n_bins > n_unique-1 or too small)
+if (n_unique5 < 3) stop("Too few non-NA pseudotime_5 values to build centerline.")
+n_bins5 <- min(max_bins, n_unique5 - 1)
+n_bins5 <- max(n_bins5, min_bins)
+n_bins5 <- min(n_bins5, n_unique5 - 1)
+
+cat("Using", n_bins5, "bins for pseudotime_5 centerline.\n")
+
+line5_df <- umap_df5 %>%
+  filter(!is.na(pseudotime5)) %>%
+  arrange(pseudotime5) %>%
+  mutate(bin = cut_number(pseudotime5, n = n_bins5)) %>%
+  group_by(bin) %>%
+  summarise(
+    umap_1   = mean(umap_1, na.rm = TRUE),
+    umap_2   = mean(umap_2, na.rm = TRUE),
+    pt_mean5 = mean(pseudotime5, na.rm = TRUE),
+    .groups  = "drop"
+  ) %>%
+  arrange(pt_mean5)
+
+## 5) Plot: UMAP colored by pseudotime_5 + centerline (+ curve) --
+
+p_umap_pt5_centerline <- ggplot() +
+  geom_point(
+    data = umap_df5,
+    aes(x = umap_1, y = umap_2, color = pseudotime5),
+    size = 0.4, alpha = 0.8
+  ) +
+  geom_path(
+    data = line5_df,
+    aes(x = umap_1, y = umap_2),
+    color = "black", size = 1.2, lineend = "round"
+  ) +
+  scale_color_viridis_c(option = "plasma", na.value = "grey80") +
+  theme_classic() +
+  ggtitle("Tumor epithelium – pseudotime 5 centerline (UMAP)")
+
+p_umap_pt5_centerline
+
+
+```
+
+
+
+### Pseudotime to proliferation cluster  
+**Figure 3 – Cycling / G2–M branch**
+
+**Description:**  
+This section visualizes the Slingshot lineage that captures the proliferative trajectory of tumor epithelial cells, corresponding to the proliferation cluster. Pseudotime values are transferred back to the Seurat object, projected onto the UMAP embedding, and the lineage curve is matched in a data-driven manner by correlating each Slingshot lineage with the lineage to the proliferation cluster. A pseudotime-binned centerline is then computed to provide a smooth geometric summary of the proliferative trajectory, and overlaid on the UMAP colored by pseudotime.
+
+**Inputs expected:**
+- `sce`: SingleCellExperiment object with Slingshot already run on the Harmony embedding  
+- `sce_umap`: Slingshot object with UMAP stored as a reducedDim and curves computed  
+- `tum_sub`: Seurat object containing UMAP, `seurat_clusters`, `stage`, and `tumor_model`  
+- `cluster_labels`, `start_cluster`: same as used for the global Slingshot run  
+
+**Output:**
+- UMAP colored by lineage pseudotime with a smoothed centerline, representing the proliferative (Cycling G2/M) branch.
+
+```{r}
+#### pseudotime to EMT cluster Figure 3 H - part 1
+
+## ============================================================
+## LINEAGE 6 – UMAP with sce$slingPseudotime_6 + matching curve
+## ============================================================
+
+library(SingleCellExperiment)
+library(slingshot)
+library(dplyr)
+library(ggplot2)
+library(scales)  # cut_number
+
+## ------------------------------------------------------------
+## 0) Align SCE to tum_sub cell order (IMPORTANT)
+## ------------------------------------------------------------
+sce <- sce[, colnames(tum_sub)]
+
+## 1) Add pseudotime_6 to Seurat + build UMAP df ----------------
+
+pt6 <- sce$slingPseudotime_6
+tum_sub$pseudotime6 <- pt6
+
+umap_df6 <- as.data.frame(Embeddings(tum_sub, "umap"))
+colnames(umap_df6)[1:2] <- c("umap_1", "umap_2")
+umap_df6$pseudotime6 <- tum_sub$pseudotime6
+umap_df6$stage       <- tum_sub$stage
+umap_df6$tumor_model <- tum_sub$tumor_model
+
+## 2) Slingshot on UMAP (to obtain curves) ----------------------
+##    NOTE: only required if you need the curve geometry. If you only
+##    want to color by pseudotime_6, you can skip this whole section.
+
+sce_umap <- sce
+SingleCellExperiment::reducedDim(sce_umap, "UMAP") <- Embeddings(tum_sub, "umap")[, 1:2]
+
+sce_umap <- slingshot(
+  sce_umap,
+  clusterLabels = cluster_labels,
+  reducedDim    = "UMAP",
+  start.clus    = start_cluster
+)
+
+## 3) Select the curve that corresponds best to pseudotime_6 -----
+
+pt_mat <- as.matrix(slingshot::slingPseudotime(sce_umap))  # cells x lineages
+pt_ref <- pt6
+
+cors <- apply(pt_mat, 2, function(x) {
+  ok <- !is.na(x) & !is.na(pt_ref)
+  if (sum(ok) < 20) return(NA_real_)
+  suppressWarnings(cor(x[ok], pt_ref[ok], method = "spearman"))
+})
+
+best_idx <- which.max(cors)
+if (length(best_idx) == 0 || is.infinite(best_idx) || is.na(cors[best_idx])) {
+  stop("Could not match slingPseudotime_6 to a lineage curve (all correlations NA).")
+}
+message(
+  "Matched pseudotime_6 to lineage column index: ", best_idx,
+  " (Spearman rho = ", signif(cors[best_idx], 3), ")."
+)
+
+curve_list <- slingCurves(sce_umap)
+crv6 <- curve_list[[best_idx]]
+
+curve6_df <- as.data.frame(crv6$s)
+colnames(curve6_df) <- c("umap_1", "umap_2")
+
+## 4) Centerline from pseudotime_6 bins --------------------------
+
+pt_vals6  <- umap_df6$pseudotime6[!is.na(umap_df6$pseudotime6)]
+n_unique6 <- length(unique(pt_vals6))
+
+max_bins <- 20
+min_bins <- 10
+
+# Guardrails (avoid n_bins > n_unique-1 or too small)
+if (n_unique6 < 3) stop("Too few non-NA pseudotime_6 values to build centerline.")
+n_bins6 <- min(max_bins, n_unique6 - 1)
+n_bins6 <- max(n_bins6, min_bins)
+n_bins6 <- min(n_bins6, n_unique6 - 1)
+
+cat("Using", n_bins6, "bins for pseudotime_6 centerline.\n")
+
+line6_df <- umap_df6 %>%
+  filter(!is.na(pseudotime6)) %>%
+  arrange(pseudotime6) %>%
+  mutate(bin = cut_number(pseudotime6, n = n_bins6)) %>%
+  group_by(bin) %>%
+  summarise(
+    umap_1   = mean(umap_1, na.rm = TRUE),
+    umap_2   = mean(umap_2, na.rm = TRUE),
+    pt_mean6 = mean(pseudotime6, na.rm = TRUE),
+    .groups  = "drop"
+  ) %>%
+  arrange(pt_mean6)
+
+## 5) Plot: UMAP colored by pseudotime_6 + centerline (+ curve) --
+
+p_umap_pt6_centerline <- ggplot() +
+  geom_point(
+    data = umap_df6,
+    aes(x = umap_1, y = umap_2, color = pseudotime6),
+    size = 0.4, alpha = 0.8
+  ) +
+  geom_path(
+    data = line6_df,
+    aes(x = umap_1, y = umap_2),
+    color = "black", size = 1.2, lineend = "round"
+  ) +
+  scale_color_viridis_c(option = "plasma", na.value = "grey80") +
+  theme_classic() +
+  ggtitle("Tumor epithelium – pseudotime 6 centerline (UMAP)")
+
+p_umap_pt6_centerline
+
+```
+
+
+
+### Pseudotime to IRC (immune-regulatory cancer cell) cluster  
+**Figure 3 – Lineage 1 (IRC / immune-evasive branch)**
+
+**Description:**  
+This section visualizes the Slingshot lineage corresponding to the immune-regulatory cancer cell (IRC) program, represented by `sce$slingPseudotime_1`. Cells are colored by pseudotime on the UMAP embedding, and the associated lineage curve is extracted from the Slingshot fit in UMAP space. A smoothed trajectory centerline is constructed by binning cells along pseudotime and averaging their UMAP coordinates, yielding a geometric representation of the IRC differentiation path from normal epithelial states towards immune-evasive tumor programs.
+
+**Inputs expected:**
+- `sce`: SingleCellExperiment object with Slingshot already run  
+- `sce_umap`: Slingshot object with UMAP stored as a reducedDim and lineage curves computed  
+- `tum_sub`: Seurat object containing UMAP and `pseudotime` (from `slingPseudotime_1`)  
+- `cluster_labels`, `start_cluster`: same as used for the global Slingshot run  
+- `umap_df`: data frame with columns `umap_1`, `umap_2`, and `pseudotime`  
+
+**Output:**
+- `p_umap_pt_centerline`: UMAP colored by IRC pseudotime with a smoothed lineage-1 centerline, representing the immune-regulatory trajectory.
+
+
+```{r}
+
+#### pseudotime to EMT cluster Figure 3 H - part 1
+
+## ============================================================
+## LINEAGE 1 – UMAP with sce$slingPseudotime_1 + matching curve
+## ============================================================
+
+library(SingleCellExperiment)
+library(slingshot)
+library(dplyr)
+library(ggplot2)
+library(scales)  # cut_number
+
+## ------------------------------------------------------------
+## 0) Align SCE to tum_sub cell order (IMPORTANT)
+## ------------------------------------------------------------
+sce <- sce[, colnames(tum_sub)]
+
+## 1) Add pseudotime_1 to Seurat + build UMAP df ----------------
+
+pt1 <- sce$slingPseudotime_1
+tum_sub$pseudotime1 <- pt1
+
+umap_df1 <- as.data.frame(Embeddings(tum_sub, "umap"))
+colnames(umap_df1)[1:2] <- c("umap_1", "umap_2")
+umap_df1$pseudotime1 <- tum_sub$pseudotime1
+umap_df1$stage       <- tum_sub$stage
+umap_df1$tumor_model <- tum_sub$tumor_model
+
+## 2) Slingshot on UMAP (to obtain curves) ----------------------
+##    NOTE: only required if you need the curve geometry. If you only
+##    want to color by pseudotime_1, you can skip this whole section.
+
+sce_umap <- sce
+SingleCellExperiment::reducedDim(sce_umap, "UMAP") <- Embeddings(tum_sub, "umap")[, 1:2]
+
+sce_umap <- slingshot(
+  sce_umap,
+  clusterLabels = cluster_labels,
+  reducedDim    = "UMAP",
+  start.clus    = start_cluster
+)
+
+## 3) Select the curve that corresponds best to pseudotime_1 -----
+
+pt_mat <- as.matrix(slingshot::slingPseudotime(sce_umap))  # cells x lineages
+pt_ref <- pt1
+
+cors <- apply(pt_mat, 2, function(x) {
+  ok <- !is.na(x) & !is.na(pt_ref)
+  if (sum(ok) < 20) return(NA_real_)
+  suppressWarnings(cor(x[ok], pt_ref[ok], method = "spearman"))
+})
+
+best_idx <- which.max(cors)
+if (length(best_idx) == 0 || is.infinite(best_idx) || is.na(cors[best_idx])) {
+  stop("Could not match slingPseudotime_1 to a lineage curve (all correlations NA).")
+}
+message(
+  "Matched pseudotime_1 to lineage column index: ", best_idx,
+  " (Spearman rho = ", signif(cors[best_idx], 3), ")."
+)
+
+curve_list <- slingCurves(sce_umap)
+crv1 <- curve_list[[best_idx]]
+
+curve1_df <- as.data.frame(crv1$s)
+colnames(curve1_df) <- c("umap_1", "umap_2")
+
+## 4) Centerline from pseudotime_1 bins --------------------------
+
+pt_vals1  <- umap_df1$pseudotime1[!is.na(umap_df1$pseudotime1)]
+n_unique1 <- length(unique(pt_vals1))
+
+max_bins <- 20
+min_bins <- 10
+
+# Guardrails (avoid n_bins > n_unique-1 or too small)
+if (n_unique1 < 3) stop("Too few non-NA pseudotime_1 values to build centerline.")
+n_bins1 <- min(max_bins, n_unique1 - 1)
+n_bins1 <- max(n_bins1, min_bins)
+n_bins1 <- min(n_bins1, n_unique1 - 1)
+
+cat("Using", n_bins1, "bins for pseudotime_1 centerline.\n")
+
+line1_df <- umap_df1 %>%
+  filter(!is.na(pseudotime1)) %>%
+  arrange(pseudotime1) %>%
+  mutate(bin = cut_number(pseudotime1, n = n_bins1)) %>%
+  group_by(bin) %>%
+  summarise(
+    umap_1   = mean(umap_1, na.rm = TRUE),
+    umap_2   = mean(umap_2, na.rm = TRUE),
+    pt_mean1 = mean(pseudotime1, na.rm = TRUE),
+    .groups  = "drop"
+  ) %>%
+  arrange(pt_mean1)
+
+## 5) Plot: UMAP colored by pseudotime_1 + centerline (+ curve) --
+
+p_umap_pt1_centerline <- ggplot() +
+  geom_point(
+    data = umap_df1,
+    aes(x = umap_1, y = umap_2, color = pseudotime1),
+    size = 0.4, alpha = 0.8
+  ) +
+  geom_path(
+    data = line1_df,
+    aes(x = umap_1, y = umap_2),
+    color = "black", size = 1.2, lineend = "round"
+  ) +
+  scale_color_viridis_c(option = "plasma", na.value = "grey80") +
+  theme_classic() +
+  ggtitle("Tumor epithelium – pseudotime 1 centerline (UMAP)")
+
+p_umap_pt1_centerline
+
+```
+
+## Final note
+
+All analyses shown here are intended for visualization and interpretation rather than quantitative inference on module score magnitudes. Pseudotime trajectories reflect inferred transcriptional continua and should be interpreted as relative progression axes rather than absolute temporal measures. Parameter choices (e.g., gamma boosting, lineage selection, binning resolution) were optimized for robustness and visual clarity across models. This notebook is fully reproducible and designed to serve as a transparent computational companion to Figure 3g–i.
