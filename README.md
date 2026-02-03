@@ -22,7 +22,7 @@ Figures 1–7 integrate:
 - Cohort and genotype overview (Fig. 1 b)
 - Histopathological stratification (Fig. 1e)
 - Single-cell atlas and investigation (Fig. 2–4)
-- Tumor immune regulatory state determinatino and immune-regulatory programs (Fig. 5–6)
+- Tumor immune regulatory state determination and immune-regulatory programs (Fig. 5–6)
 - Cross-species analysis (Fig. 7)
 
 All panels are generated from the same processed objects used for the manuscript, ensuring full computational reproducibility.
